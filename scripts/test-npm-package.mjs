@@ -9,12 +9,86 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import zlib from 'node:zlib';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const IS_WIN = process.platform === 'win32';
 const pkg = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
+
+function extractTgz(tgzPath, destDir) {
+  const tar = zlib.gunzipSync(fs.readFileSync(tgzPath));
+  const rootResolved = path.resolve(destDir);
+  let offset = 0;
+  let nextPathOverride = null;
+
+  const readCString = (buf, start, len) => {
+    const sub = buf.subarray(start, start + len);
+    const nul = sub.indexOf(0);
+    return (nul === -1 ? sub : sub.subarray(0, nul)).toString('utf8');
+  };
+
+  while (offset + 512 <= tar.length) {
+    const header = tar.subarray(offset, offset + 512);
+    offset += 512;
+    if (header.every((b) => b === 0)) break;
+
+    const modeRaw = readCString(header, 100, 8).trim();
+    const fileMode = modeRaw ? parseInt(modeRaw, 8) : 0o644;
+    const sizeRaw = readCString(header, 124, 12).trim();
+    const size = sizeRaw ? parseInt(sizeRaw, 8) : 0;
+    const typeFlag = header[156] === 0 ? '0' : String.fromCharCode(header[156]);
+    const dataStart = offset;
+    const dataEnd = dataStart + size;
+    offset += Math.ceil(size / 512) * 512;
+
+    if (typeFlag === 'x' || typeFlag === 'g') {
+      // PAX extended header: "<len> <key>=<value>\n"
+      const paxText = tar.subarray(dataStart, dataEnd).toString('utf8');
+      let pos = 0;
+      while (pos < paxText.length) {
+        const sp = paxText.indexOf(' ', pos);
+        if (sp === -1) break;
+        const recLen = parseInt(paxText.slice(pos, sp), 10);
+        if (!recLen || recLen <= 0) break;
+        const rec = paxText.slice(sp + 1, pos + recLen - 1);
+        const eq = rec.indexOf('=');
+        if (eq !== -1 && rec.slice(0, eq) === 'path') {
+          nextPathOverride = rec.slice(eq + 1);
+        }
+        pos += recLen;
+      }
+      continue;
+    }
+
+    if (typeFlag === 'L') {
+      nextPathOverride = readCString(tar, dataStart, size);
+      continue;
+    }
+
+    const name = readCString(header, 0, 100);
+    const prefix = readCString(header, 345, 155);
+    const entryName = nextPathOverride ?? (prefix ? `${prefix}/${name}` : name);
+    nextPathOverride = null;
+    if (!entryName) continue;
+
+    const outPath = path.resolve(rootResolved, entryName);
+    if (outPath !== rootResolved && !outPath.startsWith(rootResolved + path.sep)) {
+      throw new Error(`Unsafe tar entry path: ${entryName}`);
+    }
+
+    if (typeFlag === '5' || entryName.endsWith('/')) {
+      fs.mkdirSync(outPath, { recursive: true });
+    } else if (typeFlag === '0') {
+      fs.mkdirSync(path.dirname(outPath), { recursive: true });
+      fs.writeFileSync(outPath, tar.subarray(dataStart, dataEnd), { mode: fileMode });
+      if (!IS_WIN && (fileMode & 0o111) !== 0) {
+        fs.chmodSync(outPath, fileMode & 0o777);
+      }
+    }
+  }
+}
 
 function run(cmd, args, opts = {}) {
   const res = spawnSync(cmd, args, {
@@ -44,7 +118,7 @@ try {
   assert.equal(tarballs.length, 1, `Expected 1 .tgz tarball, found: ${tarballs.join(', ')}`);
   const tarball = path.join(packDir, tarballs[0]);
 
-  run('tar', ['-xzf', tarball, '-C', unpackDir]);
+  extractTgz(tarball, unpackDir);
   const pkgRoot = path.join(unpackDir, 'package');
 
   // 1. Verify required user-facing files are bundled
