@@ -90,8 +90,9 @@ def node_counts() -> tuple[dict[str, int], str, bool]:
     if counts is None:
         counts = {field: 0 for field in NODE_FIELDS}
     if result.returncode != 0:
-        print("NODE_FAILED_OUTPUT_TAIL:", file=sys.stderr)
-        for line in output.splitlines()[-25:]:
+        print("NODE_FAILED_SUMMARY:", file=sys.stderr)
+        not_ok = [line for line in output.splitlines() if "not ok " in line or "error:" in line or "location:" in line]
+        for line in (not_ok[:30] or output.splitlines()[-25:]):
             print("  " + line[:300], file=sys.stderr)
     return counts, reporter, result.returncode == 0 and counts["fail"] == 0
 
