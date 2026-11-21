@@ -1699,9 +1699,10 @@ def run_doctor(mirror_root, dsh_home=None, as_json=False):
 
     dsh_health = inspect_dsh_sessions_health(dsh_home)
     sync_health = read_sync_state(mirror_root) if read_sync_state else {"status": "unknown", "last_attempt": None, "last_success": None, "invalid_records": []}
+    sync_status = "WARN" if sync_health.get("status") in ("failed", "invalid") else "OK"
     order = {"OK": 0, "WARN": 1, "CRITICAL": 2}
     overall = "OK"
-    for st in (fts_health["status"], dsh_health["status"]):
+    for st in (fts_health["status"], dsh_health["status"], sync_status):
         if order.get(st, 0) > order.get(overall, 0):
             overall = st
 
@@ -1717,7 +1718,7 @@ def run_doctor(mirror_root, dsh_home=None, as_json=False):
     lines = [
         f"=== gitea-search-mcp 健康与 I/O 诊断报告 (Overall: {overall}) ===",
         f"[1] FTS5 索引库 ({fts_health['status']}): {db_path}",
-        f"[2] 镜像同步状态: {sync_summary(sync_health) if sync_summary else '同步状态未知'}",
+        f"[2] 镜像同步状态 ({sync_status}): {sync_summary(sync_health) if sync_summary else '同步状态未知'}",
     ]
     if fts_health["exists"]:
         pm = fts_health.get("probe_metrics", {})

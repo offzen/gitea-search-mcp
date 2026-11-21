@@ -243,9 +243,15 @@ def _stream(cmd, cap, stage, ok_rcs=(0,)):
         return lines, capped, None
 
 
-def split_grep(line, ref):
-    """git grep 输出：<ref>:<path>:<lineno>:<text>"""
+def split_grep(line, ref, files_only=False):
+    """git grep 输出：内容模式 (-n -z) 为 <ref>:<path>\\0<lineno>\\0<text>；文件列表模式 (-l) 为 <ref>:<path>"""
     body = line[len(ref) + 1:] if line.startswith(ref + ":") else line
+    if files_only:
+        return body, "", ""
+    if "\0" in body:
+        path, _, rest = body.partition("\0")
+        lineno, _, text = rest.partition("\0")
+        return path, lineno, text
     path, _, rest = body.partition(":")
     lineno, _, text = rest.partition(":")
     return path, lineno, text
@@ -304,21 +310,22 @@ def search_repo(repo, a, and_words=None):
                     return recs, capped, error
                 recs.append((repo, ref, "", "", str(len(out))))
                 continue
-            cmd = GN + [f"--git-dir={gitdir}", "grep", "-n", "-I", "--no-color"]
+            if a.files:
+                cmd = GN + [f"--git-dir={gitdir}", "grep", "-l", "-I", "--no-color"]
+            else:
+                cmd = GN + [f"--git-dir={gitdir}", "grep", "-n", "-z", "-I", "--no-color"]
             if not a.case_sensitive:
                 cmd.append("-i")
             cmd.append("-E" if (a.regex and not and_words) else "-F")
             if a.word:
                 cmd.append("-w")
-            if a.files:
-                cmd.append("-l")
             cmd += pattern_args + [ref]
             out, cap, error = _stream(cmd, per_cap, "grep", ok_rcs=(0, 1))
             capped = capped or cap
             if error:
                 return recs, capped, error
             for line in out:
-                path, lineno, text = split_grep(line, ref)
+                path, lineno, text = split_grep(line, ref, files_only=a.files)
                 recs.append((repo, ref, path, lineno, text))
         elif a.mode == "path":
             cmd = GN + [f"--git-dir={gitdir}", "ls-tree", "-r", "--name-only", ref]

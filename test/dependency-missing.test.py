@@ -67,7 +67,20 @@ class DependencyMissingTest(unittest.TestCase):
             owner_dir.mkdir(parents=True)
             db_path = Path(raw) / 'state' / 'gitea-fts.sqlite'
 
-            env_no_allow = {k: v for k, v in os.environ.items() if k not in ('GITEA_ALLOW_NO_JIEBA', 'GITQ_ALLOW_NO_JIEBA')}
+            isolated_home = Path(raw) / 'isolated-home'
+            isolated_home.mkdir(parents=True)
+            stripped_keys = (
+                'GITEA_ALLOW_NO_JIEBA', 'GITQ_ALLOW_NO_JIEBA',
+                'GITEA_VENV_PATH', 'GITQ_VENV_PATH', 'GITEA_SEARCH_CONFIG',
+            )
+            env_no_allow = {
+                **{k: v for k, v in os.environ.items() if k not in stripped_keys},
+                'HOME': str(isolated_home),
+                'USERPROFILE': str(isolated_home),
+                'XDG_CONFIG_HOME': str(isolated_home / '.config'),
+                'APPDATA': str(isolated_home / 'AppData' / 'Roaming'),
+                'PATH': str(isolated_home / 'empty-bin'),
+            }
             with mock.patch.dict(os.environ, env_no_allow, clear=True), \
                  mock.patch.object(indexer, '_JIEBA_TRIED', False), \
                  mock.patch.object(indexer, '_JIEBA', None), \

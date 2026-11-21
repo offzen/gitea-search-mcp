@@ -60,7 +60,17 @@ function makeFixture() {
 test('CLI: POSIX 下 --read 必须区分 "a\\b.md" 与 "a/b.md"', { skip: SKIP_ON_WIN }, () => {
   const dir = makeFixture();
   try {
-    const env = { ...process.env, GITEA_MIRROR_ROOT: dir, GITEA_OWNERS: 'test-owner' };
+    const home = path.join(dir, 'home');
+    fs.mkdirSync(home, { recursive: true });
+    const env = {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      XDG_CONFIG_HOME: path.join(home, '.config'),
+      GITEA_MIRROR_ROOT: dir,
+      GITEA_OWNERS: 'test-owner',
+    };
+    delete env.GITEA_SEARCH_CONFIG;
     const cli = path.join(ROOT, 'bin', 'gts');
     const read = (p) =>
       spawnSync('python3', [cli, '-r', 'repo', '--read', p], { env, encoding: 'utf8' });
@@ -171,7 +181,29 @@ function sliceFn(name) {
   throw new Error(`函数 ${name} 括号未配平`);
 }
 
-/** 在沙箱里构造 resolveSearchCli：moduleDir/home/env 可注入，log 被收集。 */
+/** 在沙箱里构造 resolveSearchCli：moduleDir/home/env 可注入，并屏蔽宿主机 /usr/local/bin 固定位防穿透。 */
+const MASKED_SYSTEM_BINS = new Set(['/usr/local/bin/gts', '/usr/local/bin/dsh-search', '/usr/local/bin/gitq']);
+
+function makeSandboxFs() {
+  const enoent = (p) => Object.assign(new Error(`ENOENT: no such file or directory, stat '${p}'`), { code: 'ENOENT' });
+  return {
+    ...fs,
+    constants: fs.constants,
+    statSync(p, ...rest) {
+      if (MASKED_SYSTEM_BINS.has(String(p))) throw enoent(p);
+      return fs.statSync(p, ...rest);
+    },
+    accessSync(p, ...rest) {
+      if (MASKED_SYSTEM_BINS.has(String(p))) throw enoent(p);
+      return fs.accessSync(p, ...rest);
+    },
+    realpathSync(p, ...rest) {
+      if (MASKED_SYSTEM_BINS.has(String(p))) throw enoent(p);
+      return fs.realpathSync(p, ...rest);
+    },
+  };
+}
+
 function loadResolver({ env, moduleDir, home }) {
   const logs = [];
   const body = [
@@ -182,7 +214,7 @@ function loadResolver({ env, moduleDir, home }) {
   ].join('\n');
   // eslint-disable-next-line no-new-func
   const api = new Function('fs', 'os', 'path', 'spawnSync', 'process', 'MODULE_DIR', 'IS_WIN', 'log', body)(
-    fs, { homedir: () => home }, path, spawnSync, { env, platform: process.platform }, moduleDir, false, (...a) => logs.push(a.join(' ')),
+    makeSandboxFs(), { homedir: () => home }, path, spawnSync, { env, platform: process.platform }, moduleDir, false, (...a) => logs.push(a.join(' ')),
   );
   return { ...api, logs };
 }
@@ -202,8 +234,6 @@ function resolverFixture() {
   fs.mkdirSync(moduleDir, { recursive: true });
   return { dir, home, moduleDir, projBin: path.join(dir, 'proj', 'bin', 'gts') };
 }
-
-const SYSTEM_GTS = fs.existsSync('/usr/local/bin/gts') || fs.existsSync('/usr/local/bin/dsh-search') || fs.existsSync('/usr/local/bin/gitq');
 
 test('B7 GTS_BIN 显式设置但不存在 ⇒ 硬报错，且不回落到固定位（即使 bin/gts 可用）', { skip: SKIP_WIN }, () => {
   const { dir, home, moduleDir, projBin } = resolverFixture();
@@ -279,7 +309,7 @@ function plantedFixture() {
   return { ...fx, marker, planted };
 }
 
-test('B6 PATH 中的相对目录/空项/"." 不会让仓库内植入的程序被执行', { skip: SKIP_WIN || (SYSTEM_GTS && '系统已安装 /usr/local/bin/gts，固定位会先命中') }, () => {
+test('B6 PATH 中的相对目录/空项/"." 不会让仓库内植入的程序被执行', { skip: SKIP_WIN }, () => {
   const { dir, home, moduleDir, marker, planted } = plantedFixture();
   const rel = path.relative(process.cwd(), path.dirname(planted));
   const good = writeExe(path.join(dir, 'good-bin', 'gts'));
@@ -293,7 +323,7 @@ test('B6 PATH 中的相对目录/空项/"." 不会让仓库内植入的程序被
   assert.ok(warn.includes(JSON.stringify(rel)) && warn.includes('(空项)') && warn.includes('"."'), `警告应列出被忽略的项: ${warn}`);
 });
 
-test('B6 PATH 只含相对/空项且 cwd 里有植入程序 ⇒ 找不到 CLI（返回 null），植入程序未执行', { skip: SKIP_WIN || (SYSTEM_GTS && '系统已安装 /usr/local/bin/gts，固定位会先命中') }, () => {
+test('B6 PATH 只含相对/空项且 cwd 里有植入程序 ⇒ 找不到 CLI（返回 null），植入程序未执行', { skip: SKIP_WIN }, () => {
   const { home, moduleDir, marker, planted } = plantedFixture();
   const cwd = process.cwd();
   process.chdir(path.dirname(planted));
@@ -308,7 +338,7 @@ test('B6 PATH 只含相对/空项且 cwd 里有植入程序 ⇒ 找不到 CLI（
   assert.equal(fs.existsSync(marker), false);
 });
 
-test('B6 PATH 命中的符号链接按 realpath 采用（真实文件），悬空链接被跳过', { skip: SKIP_WIN || (SYSTEM_GTS && '系统已安装 /usr/local/bin/gts，固定位会先命中') }, () => {
+test('B6 PATH 命中的符号链接按 realpath 采用（真实文件），悬空链接被跳过', { skip: SKIP_WIN }, () => {
   const { dir, home, moduleDir } = resolverFixture();
   const real = writeExe(path.join(dir, 'real', 'gts-real'));
   const binDir = path.join(dir, 'bin-link');
@@ -321,7 +351,7 @@ test('B6 PATH 命中的符号链接按 realpath 采用（真实文件），悬�
   assert.notEqual(r.bin, path.join(binDir, 'gts'));
 });
 
-test('B6 启发式不匹配的 PATH 程序被跳过并提示「非安全判定」；verifyIsGtsCli 已降级改名', { skip: SKIP_WIN || (SYSTEM_GTS && '系统已安装 /usr/local/bin/gts，固定位会先命中') }, () => {
+test('B6 启发式不匹配的 PATH 程序被跳过并提示「非安全判定」；verifyIsGtsCli 已降级改名', { skip: SKIP_WIN }, () => {
   const { dir, home, moduleDir } = resolverFixture();
   const other = writeExe(path.join(dir, 'other-bin', 'gts'), '#!/bin/sh\necho "GNU Triangulated Surface tool"\n');
   const resolver = loadResolver({ env: { PATH: path.dirname(other) }, moduleDir, home });
@@ -346,8 +376,20 @@ async function callServerTool(env, name, args) {
 
 test('B7 端到端：MCP server 在 GTS_BIN 不可用时返回结构化错误，而不是静默改用 bin/gts', { skip: SKIP_WIN, timeout: 30000 }, async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-b7-e2e-'));
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home, { recursive: true });
   const missing = path.join(dir, 'no-such-gts');
-  const env = { ...process.env, GITEA_MIRROR_ROOT: dir, GITEA_OWNERS: 'test-owner', GTS_BIN: missing };
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GITEA_MIRROR_ROOT: dir,
+    GITEA_OWNERS: 'test-owner',
+    GTS_BIN: missing,
+  };
+  delete env.GITEA_SEARCH_CLI;
+  delete env.GITEA_SEARCH_CONFIG;
   for (const [tool, args] of [['search_code', { query: 'x' }], ['list_repositories', {}], ['search_docs', { query: 'x' }]]) {
     const res = await callServerTool(env, tool, args);
     assert.equal(res.isError, true, tool);
@@ -355,4 +397,62 @@ test('B7 端到端：MCP server 在 GTS_BIN 不可用时返回结构化错误，
     assert.ok(res.content[0].text.includes(missing), tool);
     assert.match(res.content[0].text, /不会静默回落/, tool);
   }
+});
+
+test('D6 CLI & MCP: POSIX 下文件路径含冒号 (:) 时 git grep 内容与文件列表解析不截断路径或错位行号', { skip: SKIP_ON_WIN, timeout: 30000 }, async (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-d6-colon-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const src = path.join(dir, 'src');
+  const notesDir = path.join(src, 'sessions');
+  fs.mkdirSync(notesDir, { recursive: true });
+  const colonRelPath = 'sessions/2026-11-21T12:00:00Z:summary.md';
+  fs.writeFileSync(path.join(src, colonRelPath), 'line1\nCOLON_PATH_TOKEN key:value:tail\nline3\n');
+
+  const ident = ['-c', 'user.email=t@e.st', '-c', 'user.name=test'];
+  git(['init', '-q', '-b', 'main'], src);
+  git([...ident, 'add', '-A'], src);
+  git([...ident, 'commit', '-qm', 'add colon path file'], src);
+
+  const mirror = path.join(dir, 'mirror');
+  fs.mkdirSync(path.join(mirror, 'team'), { recursive: true });
+  git(['clone', '-q', '--bare', src, path.join(mirror, 'team', 'demo.git')], dir);
+
+  const home = path.join(dir, 'home');
+  fs.mkdirSync(home, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    GITEA_MIRROR_ROOT: mirror,
+    GITEA_OWNERS: 'team',
+  };
+  delete env.GITEA_SEARCH_CONFIG;
+  delete env.GITEA_SEARCH_CLI;
+  delete env.GTS_BIN;
+
+  const cli = path.join(ROOT, 'bin', 'gts');
+  // 1) Content JSON mode: full colon path preserved, line === 2, text intact
+  const contentRes = spawnSync('python3', [cli, '--json', 'COLON_PATH_TOKEN'], { env, encoding: 'utf8' });
+  assert.equal(contentRes.status, 0, contentRes.stderr);
+  const parsed = JSON.parse(contentRes.stdout);
+  assert.equal(parsed.total, 1);
+  assert.equal(parsed.results[0].path, colonRelPath);
+  assert.equal(parsed.results[0].line, 2);
+  assert.equal(parsed.results[0].text, 'COLON_PATH_TOKEN key:value:tail');
+
+  // 2) Files-only (-l) JSON mode: full colon path preserved without splitting on ':'
+  const filesRes = spawnSync('python3', [cli, '--json', '-l', 'COLON_PATH_TOKEN'], { env, encoding: 'utf8' });
+  assert.equal(filesRes.status, 0, filesRes.stderr);
+  const filesParsed = JSON.parse(filesRes.stdout);
+  assert.equal(filesParsed.total, 1);
+  assert.equal(filesParsed.results[0].path, colonRelPath);
+  assert.equal(filesParsed.results[0].line, null);
+  assert.equal(filesParsed.results[0].text, '');
+
+  // 3) MCP search_code files_only=true emits clean repo@ref:path without trailing '::'
+  const mcpFiles = await callServerTool(env, 'search_code', { query: 'COLON_PATH_TOKEN', files_only: true });
+  assert.notEqual(mcpFiles.isError, true, mcpFiles.content?.[0]?.text);
+  assert.match(mcpFiles.content[0].text, /team\/demo@main:sessions\/2026-11-21T12:00:00Z:summary\.md$/m);
 });

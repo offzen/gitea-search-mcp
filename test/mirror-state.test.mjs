@@ -62,8 +62,20 @@ function failedMirror(t) {
   return root;
 }
 function gtsEnv(root) {
-  const env = { ...process.env, GITEA_MIRROR_ROOT: root, GITEA_OWNERS: 'o' };
+  const home = path.join(root, 'isolated-home');
+  fs.mkdirSync(home, { recursive: true });
+  const env = {
+    ...process.env,
+    HOME: home,
+    USERPROFILE: home,
+    XDG_CONFIG_HOME: path.join(home, '.config'),
+    APPDATA: path.join(home, 'AppData', 'Roaming'),
+    LOCALAPPDATA: path.join(home, 'AppData', 'Local'),
+    GITEA_MIRROR_ROOT: root,
+    GITEA_OWNERS: 'o',
+  };
   delete env.PYTHONPATH;
+  delete env.GITEA_SEARCH_CONFIG;
   return env;
 }
 
@@ -104,4 +116,48 @@ test('B1 只在 --repos 时才报告 mirror_state 缺失（其他模式不额外
   const r = spawnSync(py, [path.join(sandbox, 'bin', 'gts'), '--show-effective-config'], { encoding: 'utf8', env: gtsEnv(root), cwd: os.tmpdir() });
   assert.equal(r.status, 0, r.stderr);
   assert.doesNotMatch(r.stderr, /mirror_state/);
+});
+
+// ── D7：gts --doctor 的 Overall 必须反映同步失败/状态损坏，但对 unrecorded 本地镜像保持 OK ──
+test('D7 gts --doctor degrades Overall to WARN on failed/invalid sync while keeping unrecorded OK', (t) => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-d7-doctor-'));
+  t.after(() => fs.rmSync(root, { recursive: true, force: true }));
+  fs.mkdirSync(path.join(root, 'o'), { recursive: true });
+  const env = { ...gtsEnv(root), GITEA_ALLOW_NO_JIEBA: '1' };
+
+  // Build an aligned empty FTS index so fts_index.status == 'OK'
+  const build = spawnSync(py, [GTS, '--reindex', '--full'], { encoding: 'utf8', env, cwd: os.tmpdir() });
+  assert.equal(build.status, 0, build.stderr);
+
+  const mockDsh = path.join(root, 'no-dsh');
+  const runDoctor = () => {
+    const r = spawnSync(py, [GTS, '--doctor', '--dsh-home', mockDsh, '--json'], { encoding: 'utf8', env, cwd: os.tmpdir() });
+    assert.equal(r.status, 0, r.stderr);
+    return JSON.parse(r.stdout);
+  };
+
+  // 1) unrecorded (manual / Zero-Gitea mirror without sync.sh) -> Overall OK
+  const unrecorded = runDoctor();
+  assert.equal(unrecorded.mirror_sync.status, 'unrecorded');
+  assert.equal(unrecorded.overall_status, 'OK');
+
+  // 2) failed sync -> Overall WARN
+  fs.writeFileSync(path.join(root, 'last_sync'), '2026-11-20T10:00:00Z');
+  fs.writeFileSync(path.join(root, 'state', 'last_status'), 'ok=0 fail=1 total=1');
+  const failed = runDoctor();
+  assert.equal(failed.mirror_sync.status, 'failed');
+  assert.equal(failed.overall_status, 'WARN');
+
+  // 3) invalid sync record -> Overall WARN
+  fs.writeFileSync(path.join(root, 'state', 'last_status'), 'corrupt-record');
+  const invalid = runDoctor();
+  assert.equal(invalid.mirror_sync.status, 'invalid');
+  assert.equal(invalid.overall_status, 'WARN');
+
+  // 4) successful sync -> Overall OK
+  fs.writeFileSync(path.join(root, 'state', 'last_ok'), '2026-11-20T10:00:00Z');
+  fs.writeFileSync(path.join(root, 'state', 'last_status'), 'ok=1 fail=0 total=1');
+  const ok = runDoctor();
+  assert.equal(ok.mirror_sync.status, 'success');
+  assert.equal(ok.overall_status, 'OK');
 });
