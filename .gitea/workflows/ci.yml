@@ -1,24 +1,20 @@
 name: gate2 Linux CI
 
-# Once .gitea/workflows exists it is the complete Gitea Actions authority for
-# this repository. GitHub clean-platform jobs remain in .github/workflows.
 on:
   push:
-    branches: [main, 'v*', 'release/**', 'fix/**', 'rc/**']
+    branches: [main, 'v*', 'release/**', 'fix/**']
   pull_request:
     branches: [main, 'release/**']
   workflow_dispatch:
 
 jobs:
   linux-gate:
-    name: Exact-SHA Linux gate
+    name: Isolated Linux CI gate
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 25
     steps:
-      - name: Checkout exact event commit
+      - name: Checkout source
         uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: Install system and Python build dependencies
         run: |
@@ -34,43 +30,9 @@ jobs:
             echo "::error::unsupported runner package manager"
             exit 1
           fi
-          # Install into an isolated venv: Debian/Ubuntu runners are PEP 668
-          # "externally managed", so a system-level `pip install build jieba`
-          # fails with externally-managed-environment (rc4 gate run 148/424/425).
-          # linux-gate.sh invokes bare `python3`, so the venv must be on PATH for
-          # the later gate step too, not only for this install step.
           python3 -m venv "$RUNNER_TEMP/gate2-venv"
           echo "$RUNNER_TEMP/gate2-venv/bin" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/gate2-venv/bin/python" -m pip install --disable-pip-version-check --no-input --upgrade build jieba PyYAML
-          "$RUNNER_TEMP/gate2-venv/bin/python" -c 'import build, jieba, yaml; print("gate2 venv ready")'
 
-      - name: Run deterministic exact-SHA gate
-        env:
-          GTS_CI_RECEIPT: ${{ runner.temp }}/dsh-gitea-search-gate2-linux-${{ github.run_id }}-${{ github.sha }}.json
-        run: bash scripts/ci/linux-gate.sh "${{ github.sha }}" "$GTS_CI_RECEIPT"
-
-      - name: Validate receipt remains outside tracked source
-        env:
-          GTS_CI_RECEIPT: ${{ runner.temp }}/dsh-gitea-search-gate2-linux-${{ github.run_id }}-${{ github.sha }}.json
-        run: |
-          test ! -e "$GITHUB_WORKSPACE/$(basename "$GTS_CI_RECEIPT")"
-          test -s "$GTS_CI_RECEIPT"
-
-      - name: Publish gate2 receipt summary
-        # actions/upload-artifact@v4 fails on the Gitea act_runner with
-        # GHESNotSupportedError, which made an otherwise-green gate report
-        # failure (rc4 run 427/150). The Windows lane never used artifacts
-        # either: its evidence contract is job conclusion plus a receipt file
-        # kept outside the tracked tree. Emit the receipt into the job log as
-        # the durable record instead of relying on artifact storage.
-        env:
-          GTS_CI_RECEIPT: ${{ runner.temp }}/dsh-gitea-search-gate2-linux-${{ github.run_id }}-${{ github.sha }}.json
-        run: |
-          set -euo pipefail
-          RECEIPT="$GTS_CI_RECEIPT"
-          test -s "$RECEIPT"
-          echo "gate2 receipt: $RECEIPT"
-          echo "receipt_sha256=$(sha256sum "$RECEIPT" | cut -d' ' -f1)"
-          echo '--- receipt begin ---'
-          cat "$RECEIPT"
-          echo '--- receipt end ---'
+      - name: Run isolated Linux gate
+        run: bash scripts/ci/linux-gate.sh

@@ -5,61 +5,39 @@ import fs from 'node:fs';
 
 const gate = fs.readFileSync(new URL('../scripts/ci/linux-gate.sh', import.meta.url), 'utf8');
 const workflow = fs.readFileSync(new URL('../.gitea/workflows/ci.yml', import.meta.url), 'utf8');
-const preflight = fs.readFileSync(new URL('../scripts/release-preflight.py', import.meta.url), 'utf8');
-const receiptWriter = fs.readFileSync(new URL('../.github/scripts/write-gate-receipt.py', import.meta.url), 'utf8');
 const githubCi = fs.readFileSync(new URL('../.github/workflows/ci.yml', import.meta.url), 'utf8');
 const windowsCi = fs.readFileSync(new URL('../.github/workflows/windows-ci.yml', import.meta.url), 'utf8');
-const docs = fs.readFileSync(new URL('../docs/DEVELOPMENT-AND-RELEASE.md', import.meta.url), 'utf8');
+const releaseCi = fs.readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8');
 
-test('gate2 workflow is complete Linux authority and binds event exact SHA', () => {
+test('gate2 workflow runs isolated Linux gate with full Python/Node test dependencies', () => {
   assert.match(workflow, /name: gate2 Linux CI/);
   assert.match(workflow, /runs-on: ubuntu-latest/);
-  assert.match(workflow, /scripts\/ci\/linux-gate\.sh "\$\{\{ github\.sha \}\}"/);
-  // upload-artifact@v4 is unsupported by the Gitea act_runner
-  // (GHESNotSupportedError), so the receipt is published into the job log.
-  assert.doesNotMatch(workflow, /^\s*uses:\s*actions\/upload-artifact/m);
-  assert.match(workflow, /receipt_sha256=/);
+  assert.match(workflow, /scripts\/ci\/linux-gate\.sh/);
   assert.match(workflow, /--upgrade build jieba PyYAML/);
-  assert.match(workflow, /--- receipt begin ---/);
   assert.doesNotMatch(workflow, /windows-latest|self-hosted|vtwsl/i);
 });
 
-test('Linux gate strips ambient aliases and fails closed on reused receipt paths', () => {
+test('Linux gate strips ambient config aliases and enforces four-cell packaging + hygiene', () => {
   for (const name of [
     'GITEA_MIRROR_ROOT', 'GITEA_MIRROR_PATH', 'GITQ_MIRROR_ROOT',
     'GITEA_OWNERS', 'GITEA_OWNER', 'GITQ_OWNER', 'GITEA_SEARCH_CONFIG',
-  ]) assert.match(gate, new RegExp(name));
-  assert.match(gate, /\^\[0-9a-f\]\{40\}\$/);
-  assert.match(gate, /receipt path must be outside the tracked checkout/);
-  assert.match(gate, /receipt path already exists; use a new path/);
-  assert.match(gate, /\[\[ -e "\$RECEIPT_PATH" \|\| -L "\$RECEIPT_PATH" \]\]/);
-  assert.match(gate, /"gate": "gate2-linux"/);
-  assert.match(gate, /GITEA_ACTIONS:-.*!= "true"/);
-  assert.match(gate, /GITHUB_WORKFLOW:-.*gate2 Linux CI/);
-  assert.match(gate, /Gitea event payload does not match repository\/ref\/checkout identity/);
-  assert.match(gate, /"workflow_ref_source": os\.environ\["GATE_WORKFLOW_REF_SOURCE"\]/);
+  ]) {
+    assert.match(gate, new RegExp(name));
+  }
+  assert.match(gate, /collect-test-counts\.py/);
+  assert.match(gate, /test-python-package\.py/);
+  assert.match(gate, /test-npm-package\.mjs/);
+  assert.match(gate, /check-public-hygiene\.py/);
 });
 
-test('release preflight accepts only hosted clean Windows evidence', () => {
-  assert.match(preflight, /ALLOWED_WINDOWS_PROVIDERS = \{"github-actions-hosted"\}/);
-  assert.match(preflight, /github-hosted-clean-windows/);
-  assert.match(preflight, /P must change only PROVENANCE\.json/);
-  assert.match(preflight, /PROVENANCE source_commit must equal D/);
-  assert.match(docs, /Historical rc3, vtWSL, self-hosted, Task, Broker, or local-canary evidence is rejected/);
-});
-
-test('GitHub workflows emit exact-SHA receipts only after required hosted jobs', () => {
-  assert.match(receiptWriter, /GitHub repository identity must be owner\/name/);
-  assert.doesNotMatch(receiptWriter, /offzen\/dsh-gitea-search/);
-  assert.match(preflight, /--expected-hosted-repository/);
-  assert.match(receiptWriter, /provider": "github-actions-hosted/);
-  assert.match(receiptWriter, /workflow_dispatch exact_sha does not match checkout/);
-  assert.match(githubCi, /exact_sha:/);
-  assert.match(windowsCi, /exact_sha:/);
-  assert.match(githubCi, /hosted-linux-receipt:[\s\S]*needs: \[test, package\]/);
-  assert.match(githubCi, /hosted-macos-receipt:[\s\S]*needs: \[test-macos\]/);
-  assert.match(githubCi, /--gate github-linux/);
-  assert.match(githubCi, /--gate github-macos/);
-  assert.match(windowsCi, /needs: \[windows-pe, windows-ps, windows-tests, windows-git-bash, windows-grep-crlf\]/);
-  assert.match(windowsCi, /--gate github-windows/);
+test('GitHub workflows run Linux, macOS, and Windows gates without duplicate receipt jobs and attest releases', () => {
+  assert.doesNotMatch(githubCi, /hosted-linux-receipt|hosted-macos-receipt|write-gate-receipt/);
+  assert.doesNotMatch(windowsCi, /hosted-windows-receipt|write-gate-receipt/);
+  assert.match(githubCi, /collect-test-counts\.py/);
+  assert.match(githubCi, /test-npm-package\.mjs/);
+  assert.match(githubCi, /check-public-hygiene\.py/);
+  for (const job of ['windows-pe:', 'windows-ps:', 'windows-tests:', 'windows-git-bash:', 'windows-grep-crlf:']) {
+    assert.match(windowsCi, new RegExp(job));
+  }
+  assert.match(releaseCi, /actions\/attest-build-provenance@v2/);
 });

@@ -20,14 +20,11 @@
     "gts_cli.py",
     "pyproject.toml",
     "config.example.json",
-    "docs/",
+    "docs/*.md",
     "extras/",
     "README.md",
     "UPGRADING.md",
-    "MANUAL.md",
-    "WINDOWS-PORT.md",
     "CHANGELOG.md",
-    "RELEASE-NOTES.md",
     "LICENSE"
   ],
   "repository": {
@@ -48,9 +45,12 @@
   ],
   "scripts": {
     "test": "node --test",
-    "test:preflight": "python3 test/release-preflight.test.py && python3 test/hosted-receipt.test.py && python3 test/collect-test-counts.test.py && python3 test/fetch-remote-evidence.test.py && python3 test/workflow-contract.test.py && python3 test/linux-gate-context.test.py && python3 test/dependency-missing.test.py && python3 test/owner-qualified-repos.test.py && python3 test/fts-result-contract.test.py && python3 test/profile-yaml.test.py && python3 test/repo-zero-hit.test.py && python3 test/documentation-contract.test.py",
+    "test:python": "python3 test/collect-test-counts.test.py && python3 test/dependency-missing.test.py && python3 test/owner-qualified-repos.test.py && python3 test/fts-result-contract.test.py && python3 test/profile-yaml.test.py && python3 test/repo-zero-hit.test.py && python3 test/documentation-contract.test.py",
+    "test:preflight": "npm run test:python",
     "test:e2e": "bash scripts/run-e2e-test.sh",
-    "test:all": "node --test && npm run test:preflight && bash scripts/run-e2e-test.sh"
+    "test:pack": "node scripts/test-npm-package.mjs",
+    "test:hygiene": "python3 scripts/check-public-hygiene.py",
+    "test:all": "node --test && npm run test:python && bash scripts/run-e2e-test.sh"
   },
   "engines": {
     "node": ">=20.11.0"

@@ -4,7 +4,6 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 
 const server = fs.readFileSync(new URL('../lib/server.mjs', import.meta.url), 'utf8');
-const readme = fs.readFileSync(new URL('../README.md', import.meta.url), 'utf8');
 const naming = fs.readFileSync(new URL('../docs/TOOL-NAMING.md', import.meta.url), 'utf8');
 const pkg = JSON.parse(fs.readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
 const lock = JSON.parse(fs.readFileSync(new URL('../package-lock.json', import.meta.url), 'utf8'));
@@ -14,9 +13,8 @@ const setupMac = fs.readFileSync(new URL('../scripts/setup-macos.sh', import.met
 const setupWindows = fs.readFileSync(new URL('../scripts/setup-windows.ps1', import.meta.url), 'utf8');
 const windowsCi = fs.readFileSync(new URL('../.github/workflows/windows-ci.yml', import.meta.url), 'utf8');
 const packageGate = fs.readFileSync(new URL('../scripts/test-python-package.py', import.meta.url), 'utf8');
-const provenance = JSON.parse(fs.readFileSync(new URL('../PROVENANCE.json', import.meta.url), 'utf8'));
 
-test('package, lockfile, pyproject, and MCP server identity stay aligned without asserting live release state', () => {
+test('package, lockfile, pyproject, and MCP server identity stay aligned', () => {
   assert.equal(pkg.name, 'gitea-search-mcp');
   assert.equal(lock.name, 'gitea-search-mcp');
   assert.equal(lock.packages[''].name, 'gitea-search-mcp');
@@ -32,13 +30,6 @@ test('package, lockfile, pyproject, and MCP server identity stay aligned without
     ['needs', 'Fallback'].join(''),
   ].join('|'));
   assert.doesNotMatch(server, forbiddenFallback);
-  assert.match(readme, /正式发布状态以对应 Release 记录为准/);
-  assert.match(readme, /版本号本身不证明工作树已通过发布门禁/);
-});
-
-test('candidate provenance is frozen to an exact content commit', () => {
-  assert.match(provenance.source_commit, /^[0-9a-f]{40}$/);
-  assert.notEqual(provenance.source_commit, 'pending-candidate-freeze');
 });
 
 test('document search declares default-branch scope and cold-start boundary', () => {
@@ -64,10 +55,11 @@ test('optional skill exists and is not auto-installed', () => {
   }
 });
 
-test('Python artifacts include every module used by installed gts', () => {
+test('Python and npm artifact validators exist and cover every installed module', () => {
   assert.match(pyproject, /"share\/gitea-search-mcp\/bin"\s*=\s*\["bin\/gts"\]/);
   assert.match(pyproject, /"share\/gitea-search-mcp\/lib"\s*=\s*\[[^\]]*"lib\/indexer\.py"[^\]]*"lib\/config\.py"[^\]]*\]/s);
   assert.equal(fs.existsSync(new URL('../scripts/test-python-package.py', import.meta.url)), true);
+  assert.equal(fs.existsSync(new URL('../scripts/test-npm-package.mjs', import.meta.url)), true);
 });
 
 test('Windows hosted gates preserve UTF-8 output and native fallback prerequisites', () => {

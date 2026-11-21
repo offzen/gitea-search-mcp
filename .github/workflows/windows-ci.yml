@@ -14,11 +14,6 @@ on:
   pull_request:
     branches: [ main, 'release/**' ]
   workflow_dispatch:
-    inputs:
-      exact_sha:
-        description: Full 40-hex candidate SHA; must equal the dispatched ref SHA
-        required: true
-        type: string
 
 jobs:
   # ── W5：pip install . 必须产出真正的 PE 文件（MZ 头），而不是脚本垫片 ──────
@@ -346,85 +341,3 @@ jobs:
           if ($r -match "`r") { Write-Host "⚠️ git grep 输出含 CR —— 调用方需 strip" }
           Write-Host "✅ W9 通过：bare 仓检索可用"
           Pop-Location
-
-  hosted-windows-receipt:
-    name: Final exact-SHA hosted Windows receipt
-    if: github.server_url == 'https://github.com' && github.event_name != 'pull_request'
-    needs: [windows-pe, windows-ps, windows-tests, windows-git-bash, windows-grep-crlf]
-    runs-on: windows-latest
-    steps:
-      - name: Checkout exact event commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-
-      - name: Set up Python 3.12
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-
-      - name: Set up Node.js 22
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-
-      - name: Verify workflow identity (measured env, exact match)
-        # rc7 A3: workflow_ref / run_attempt are read from the runner's own environment and the
-        # expected workflow_ref is recomputed here; any difference fails the job before a
-        # receipt can be written (exit 69). Same-party check: it stops accidents, not a forger.
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected="${GITHUB_REPOSITORY}/.github/workflows/windows-ci.yml@${GITHUB_REF}"
-          if [ "${GITHUB_WORKFLOW_REF:-}" != "$expected" ]; then
-            echo "::error::GITHUB_WORKFLOW_REF '${GITHUB_WORKFLOW_REF:-}' != computed '$expected'"
-            exit 69
-          fi
-          case "${GITHUB_RUN_ATTEMPT:-}" in
-            ''|*[!0-9]*|0*) echo "::error::GITHUB_RUN_ATTEMPT is not a positive integer"; exit 69 ;;
-          esac
-      - name: Mark gate start
-        shell: pwsh
-        # rc6 F3: record the real gate start instead of letting the writer default to now().
-        run: |
-          $started = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
-          "GTS_GATE_STARTED_AT=$started" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      - name: Install Python & Node Dependencies
-        shell: bash
-        run: |
-          pip install jieba PyYAML
-          npm install
-
-      - name: Run the suite this receipt attests to
-        shell: bash
-        # rc6 F8: the receipt job runs the suite itself so the counts are real.
-        # --skip-e2e: the e2e suite needs the Git-Bash environment that the separate
-        # `windows-git-bash` job provides, so this job records node/python counts only
-        # and the verifier requires that job's success via `needs` instead.
-        run: python scripts/collect-test-counts.py --skip-e2e --output "$RUNNER_TEMP/test-counts.json"
-
-      - name: Write hosted clean-runner receipt
-        shell: pwsh
-        env:
-          GTS_DISPATCH_EXACT_SHA: ${{ github.event.inputs.exact_sha || github.sha }}
-        run: >-
-          python .github/scripts/write-gate-receipt.py
-          --gate github-windows
-          --commit "${{ github.sha }}"
-          --runner-label windows-latest
-          --output "${{ runner.temp }}/github-windows.json"
-          --test-counts "${{ runner.temp }}/test-counts.json"
-          --needs-results '{"windows-pe":"${{ needs.windows-pe.result }}","windows-ps":"${{ needs.windows-ps.result }}","windows-tests":"${{ needs.windows-tests.result }}","windows-git-bash":"${{ needs.windows-git-bash.result }}","windows-grep-crlf":"${{ needs.windows-grep-crlf.result }}"}'
-          --gate-started-at "$env:GTS_GATE_STARTED_AT"
-
-      - name: Upload hosted Windows receipt
-        uses: actions/upload-artifact@v4
-        with:
-          name: github-windows-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/github-windows.json
-            ${{ runner.temp }}/test-counts.json
-          if-no-files-found: error
-          retention-days: 30

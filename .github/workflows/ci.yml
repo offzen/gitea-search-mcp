@@ -6,19 +6,10 @@ on:
   pull_request:
     branches: [ main, 'release/**' ]
   workflow_dispatch:
-    inputs:
-      exact_sha:
-        description: Full 40-hex candidate SHA; must equal the dispatched ref SHA
-        required: true
-        type: string
 
 jobs:
-  # Ubuntu 与 macOS 共用同一套验证（单元测试 + e2e）。
-  # 此前 Linux 只跑 e2e、Windows 只跑单元用例，两个平台各自看不到对方的失败，
-  # v1.2.2-rc 的 POSIX 回归正是从这道缝里漏过去的。现在两个 job 都跑完整组合，
-  # 且单元测试中的 POSIX 语义用例会在 Windows 上自动 skip、在 POSIX 上生效。
   test:
-    name: Unit + E2E (Ubuntu, py${{ matrix.python }}, node${{ matrix.node }})
+    name: Unit + E2E + Floors (Ubuntu, py${{ matrix.python }}, node${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -47,16 +38,16 @@ jobs:
       - name: Install Python & Node Dependencies
         run: |
           pip install jieba PyYAML
-          npm install
+          npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Run Unit + E2E Test Suite
+      - name: Run Full Test Suite with Fail-Closed Count Floors
         run: |
           python3 -V
           node -v
-          npm run test:all
+          python3 scripts/collect-test-counts.py
 
   package:
-    name: Python wheel + sdist (Ubuntu, py3.12)
+    name: Packaging (wheel + sdist + npm pack) & Hygiene
     runs-on: ubuntu-latest
     steps:
       - name: Checkout Code
@@ -67,22 +58,27 @@ jobs:
         with:
           python-version: '3.12'
 
-      - name: Build wheel and sdist
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Build & Validate Python wheel and sdist outside checkout
         run: |
           python -m pip install --upgrade build
           python -m build
+          python scripts/test-python-package.py dist
 
-      - name: Install artifacts away from the checkout
-        run: python scripts/test-python-package.py dist
+      - name: Build & Validate npm tarball outside checkout
+        run: |
+          npm ci --ignore-scripts --no-audit --no-fund
+          node scripts/test-npm-package.mjs
 
-      - name: Check frozen provenance manifest
-        run: python scripts/check-provenance.py
+      - name: Check public-tree hygiene
+        run: python scripts/check-public-hygiene.py
 
   test-macos:
-    name: Unit + E2E (macOS, py3.12, node22)
-    # 本项目 v1.2.0 起就带 BSD 兼容代码（macOS 与 Linux 共用这批共享文件），
-    # 但直到 v1.2.2-rc 仍没有 macOS runner，Apple Silicon/APFS 侧的路径语义
-    # 完全没有被验证过。补上，确保 Windows 适配不会再悄悄改坏 POSIX 行为。
+    name: Unit + E2E + Floors (macOS, py3.12, node22)
     runs-on: macos-latest
     steps:
       - name: Checkout Code
@@ -100,149 +96,16 @@ jobs:
 
       - name: Install System Dependencies
         run: |
-          # macOS 自带 sqlite3；zstd 视镜像而定，缺了才装
           command -v sqlite3 || brew install sqlite
           command -v zstd || brew install zstd
 
       - name: Install Python & Node Dependencies
         run: |
           pip install jieba PyYAML
-          npm install
+          npm ci --ignore-scripts --no-audit --no-fund
 
-      - name: Run Unit + E2E Test Suite
+      - name: Run Full Test Suite with Fail-Closed Count Floors
         run: |
           python3 -V
           node -v
-          npm run test:all
-
-  hosted-linux-receipt:
-    name: Hosted Linux exact-SHA receipt
-    if: github.server_url == 'https://github.com' && github.event_name != 'pull_request'
-    needs: [test, package]
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout exact event commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Verify workflow identity (measured env, exact match)
-        # rc7 A3: workflow_ref / run_attempt are read from the runner's own environment and the
-        # expected workflow_ref is recomputed here; any difference fails the job before a
-        # receipt can be written (exit 69). Same-party check: it stops accidents, not a forger.
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected="${GITHUB_REPOSITORY}/.github/workflows/ci.yml@${GITHUB_REF}"
-          if [ "${GITHUB_WORKFLOW_REF:-}" != "$expected" ]; then
-            echo "::error::GITHUB_WORKFLOW_REF '${GITHUB_WORKFLOW_REF:-}' != computed '$expected'"
-            exit 69
-          fi
-          case "${GITHUB_RUN_ATTEMPT:-}" in
-            ''|*[!0-9]*|0*) echo "::error::GITHUB_RUN_ATTEMPT is not a positive integer"; exit 69 ;;
-          esac
-      - name: Mark gate start
-        # rc6 F3: the receipt records when the gate actually started, instead of
-        # falling back to now() and reporting a zero-length window.
-        run: echo "GTS_GATE_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: Install Python & Node Dependencies
-        run: |
-          pip install jieba PyYAML
-          npm install
-      - name: Run the suite this receipt attests to
-        # rc6 F8: the receipt job executes the suite itself, so the recorded counts
-        # describe tests that really ran on this runner for this exact SHA.
-        run: python3 scripts/collect-test-counts.py --output "${{ runner.temp }}/test-counts.json"
-      - name: Write exact-SHA hosted receipt
-        env:
-          GTS_DISPATCH_EXACT_SHA: ${{ github.event.inputs.exact_sha || github.sha }}
-        run: >-
-          python .github/scripts/write-gate-receipt.py
-          --gate github-linux
-          --commit "${{ github.sha }}"
-          --runner-label ubuntu-latest
-          --output "${{ runner.temp }}/github-linux.json"
-          --test-counts "${{ runner.temp }}/test-counts.json"
-          --needs-results '{"test":"${{ needs.test.result }}","package":"${{ needs.package.result }}"}'
-          --gate-started-at "$GTS_GATE_STARTED_AT"
-      - name: Upload hosted receipt
-        uses: actions/upload-artifact@v4
-        with:
-          name: github-linux-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/github-linux.json
-            ${{ runner.temp }}/test-counts.json
-          if-no-files-found: error
-          retention-days: 30
-
-  hosted-macos-receipt:
-    name: Hosted macOS exact-SHA receipt
-    if: github.server_url == 'https://github.com' && github.event_name != 'pull_request'
-    needs: [test-macos]
-    runs-on: macos-latest
-    steps:
-      - name: Checkout exact event commit
-        uses: actions/checkout@v4
-        with:
-          ref: ${{ github.sha }}
-          fetch-depth: 1
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-      - name: Verify workflow identity (measured env, exact match)
-        # rc7 A3: workflow_ref / run_attempt are read from the runner's own environment and the
-        # expected workflow_ref is recomputed here; any difference fails the job before a
-        # receipt can be written (exit 69). Same-party check: it stops accidents, not a forger.
-        shell: bash
-        run: |
-          set -euo pipefail
-          expected="${GITHUB_REPOSITORY}/.github/workflows/ci.yml@${GITHUB_REF}"
-          if [ "${GITHUB_WORKFLOW_REF:-}" != "$expected" ]; then
-            echo "::error::GITHUB_WORKFLOW_REF '${GITHUB_WORKFLOW_REF:-}' != computed '$expected'"
-            exit 69
-          fi
-          case "${GITHUB_RUN_ATTEMPT:-}" in
-            ''|*[!0-9]*|0*) echo "::error::GITHUB_RUN_ATTEMPT is not a positive integer"; exit 69 ;;
-          esac
-      - name: Mark gate start
-        run: echo "GTS_GATE_STARTED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_ENV"
-      - name: Install System Dependencies
-        run: |
-          command -v sqlite3 || brew install sqlite
-          command -v zstd || brew install zstd
-      - name: Install Python & Node Dependencies
-        run: |
-          pip install jieba PyYAML
-          npm install
-      - name: Run the suite this receipt attests to
-        run: python3 scripts/collect-test-counts.py --output "${{ runner.temp }}/test-counts.json"
-      - name: Write exact-SHA hosted receipt
-        env:
-          GTS_DISPATCH_EXACT_SHA: ${{ github.event.inputs.exact_sha || github.sha }}
-        run: >-
-          python .github/scripts/write-gate-receipt.py
-          --gate github-macos
-          --commit "${{ github.sha }}"
-          --runner-label macos-latest
-          --output "${{ runner.temp }}/github-macos.json"
-          --test-counts "${{ runner.temp }}/test-counts.json"
-          --needs-results '{"test-macos":"${{ needs.test-macos.result }}"}'
-          --gate-started-at "$GTS_GATE_STARTED_AT"
-      - name: Upload hosted receipt
-        uses: actions/upload-artifact@v4
-        with:
-          name: github-macos-${{ github.sha }}
-          path: |
-            ${{ runner.temp }}/github-macos.json
-            ${{ runner.temp }}/test-counts.json
-          if-no-files-found: error
-          retention-days: 30
+          python3 scripts/collect-test-counts.py
