@@ -48,6 +48,7 @@ cd "$ROOT_DIR"
 npm ci --ignore-scripts --no-audit --no-fund
 python3 -c 'import jieba, yaml' >/dev/null
 python3 scripts/collect-test-counts.py
+bash scripts/respawn-mcp.sh --selftest
 
 BUILD_ROOT="$SCRATCH/python-build"
 if python3 -c 'import build' >/dev/null 2>&1; then

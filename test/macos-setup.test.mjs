@@ -81,3 +81,14 @@ test('setup-macos updates only the selected profile', { skip: !IS_POSIX && 'requ
   assert.equal((desktop.match(/id: mcp-gitea-search/g) || []).length, 1);
   assert.equal(web, '[]\n');
 });
+
+test('setup-macos rejects all placeholder owners before checking dependencies', { skip: !IS_POSIX && 'requires a POSIX shell runtime' }, () => {
+  for (const placeholder of ['', 'myorg', 'example-org', 'your-org', 'your-owner']) {
+    const env = { ...process.env, GITEA_OWNERS: placeholder };
+    delete env.GITEA_OWNER;
+    delete env.GITQ_OWNER;
+    const result = spawnSync('bash', [SETUP], { cwd: ROOT, encoding: 'utf8', env });
+    assert.equal(result.status, 2, `Expected status 2 for placeholder=${JSON.stringify(placeholder)}, got ${result.status}`);
+    assert.match(result.stderr, /CONFIG_ERROR/);
+  }
+});

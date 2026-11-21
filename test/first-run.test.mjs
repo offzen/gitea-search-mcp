@@ -159,3 +159,27 @@ test('onboarding reports invalid configuration without a JSON traceback', { skip
   assert.match(result.stderr, /FAIL: effective config is invalid/);
   assert.doesNotMatch(result.stderr, /JSONDecodeError|Traceback/);
 });
+
+test('onboarding prefers GITEA_SEARCH_CLI over a broken GTS_BIN', { skip: !POSIX }, (t) => {
+  const { dir, env } = fixture(t);
+  const app = path.join(dir, 'app');
+  fs.mkdirSync(path.join(app, 'bin'), { recursive: true });
+  fs.mkdirSync(path.join(app, 'lib'));
+  fs.mkdirSync(path.join(app, 'scripts'));
+  fs.copyFileSync(path.join(ROOT, 'bin', 'gts'), path.join(app, 'bin', 'gts'));
+  fs.chmodSync(path.join(app, 'bin', 'gts'), 0o755);
+  for (const name of ['config.py', 'indexer.py', 'mirror_state.py']) {
+    fs.copyFileSync(path.join(ROOT, 'lib', name), path.join(app, 'lib', name));
+  }
+  fs.copyFileSync(path.join(ROOT, 'scripts', 'onboarding.sh'), path.join(app, 'scripts', 'onboarding.sh'));
+  const mirror = path.join(dir, 'mirror');
+  fs.mkdirSync(path.join(mirror, 'team', 'demo.git'), { recursive: true });
+  const config = path.join(dir, 'config.json');
+  fs.writeFileSync(config, JSON.stringify({ mirror_root: mirror, owners: ['team'] }));
+  env.GITEA_SEARCH_CONFIG = config;
+  env.GITEA_SEARCH_CLI = path.join(app, 'bin', 'gts');
+  env.GTS_BIN = path.join(dir, 'missing-gts');
+  const result = spawnSync('bash', [path.join(app, 'scripts', 'onboarding.sh'), '--verify'], { encoding: 'utf8', env, timeout: 15000 });
+  assert.equal(result.status, 0, `${result.stdout}\n${result.stderr}`);
+  assert.match(result.stdout, /Configuration: valid/);
+});

@@ -90,15 +90,32 @@ function extractTgz(tgzPath, destDir) {
   }
 }
 
+function winQuoteArg(arg) {
+  const s = String(arg);
+  if (!/[\s"&|<>^()]/.test(s)) return s;
+  return `"${s.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, '$1$1')}"`;
+}
+
 function run(cmd, args, opts = {}) {
-  const res = spawnSync(cmd, args, {
+  const useCmdExe = IS_WIN && /\.(cmd|bat)$/i.test(cmd);
+  const spawnCmd = useCmdExe ? (process.env.ComSpec || 'cmd.exe') : cmd;
+  const spawnArgs = useCmdExe
+    ? ['/d', '/s', '/c', `"${[cmd, ...args].map(winQuoteArg).join(' ')}"`]
+    : args;
+  const res = spawnSync(spawnCmd, spawnArgs, {
     encoding: 'utf8',
-    shell: IS_WIN && /\.(cmd|bat)$/i.test(cmd),
+    windowsVerbatimArguments: useCmdExe,
+    windowsHide: true,
     ...opts,
   });
   if (res.status !== 0) {
     throw new Error(`Command failed (${res.status}): ${cmd} ${args.join(' ')}\nstdout:\n${res.stdout}\nstderr:\n${res.stderr}`);
   }
+  assert.equal(
+    String(res.stderr || '').includes('DEP0190'),
+    false,
+    `Unexpected Node DEP0190 warning while running ${cmd}:\n${res.stderr}`,
+  );
   return res;
 }
 

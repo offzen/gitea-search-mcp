@@ -82,12 +82,14 @@ jobs:
           if ($bad) { throw "Scripts 下的 gts 被数据文件覆盖（$($bad.FullName), $($bad.Length) B）" }
           Write-Host "✅ Scripts 入口未被数据文件覆盖"
 
-      - name: Build and validate wheel + sdist from a neutral directory
+      - name: Build and validate wheel, sdist, and npm pack from a neutral directory
         shell: pwsh
         run: |
           python -m pip install --upgrade build
           python -m build
           python scripts/test-python-package.py dist
+          npm ci --ignore-scripts --no-audit --no-fund
+          node scripts/test-npm-package.mjs
 
   # ── W6：PowerShell 5.1 / 7 安装器真实 WhatIf + AST 契约 ───────────────
   windows-ps:
@@ -97,18 +99,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: 语法检查（AST Parser）
+      - name: 语法检查（AST Parser：setup-windows / onboarding / doctor-mcp）
         shell: pwsh
         run: |
-          $path = Resolve-Path scripts/setup-windows.ps1
-          $errors = $null
-          $tokens = $null
-          [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
-          if ($errors -and $errors.Count -gt 0) {
-            $errors | ForEach-Object { Write-Host "ERROR: $($_.Extent.StartLineNumber): $($_.Message)" }
-            throw "setup-windows.ps1 有 $($errors.Count) 处语法错误"
+          foreach ($rel in @('scripts/setup-windows.ps1', 'scripts/onboarding.ps1', 'scripts/doctor-mcp.ps1')) {
+            $path = Resolve-Path $rel
+            $errors = $null
+            $tokens = $null
+            [void][System.Management.Automation.Language.Parser]::ParseFile($path, [ref]$tokens, [ref]$errors)
+            if ($errors -and $errors.Count -gt 0) {
+              $errors | ForEach-Object { Write-Host "ERROR ($rel): $($_.Extent.StartLineNumber): $($_.Message)" }
+              throw "$rel 有 $($errors.Count) 处语法错误"
+            }
+            Write-Host "✅ AST 通过：$rel（$($tokens.Count) tokens）"
           }
-          Write-Host "✅ W6 通过：0 语法错误（$($tokens.Count) tokens）"
 
       - name: 参数契约检查（Owners / MirrorRoot / SkipIndex / RegisterDsh / Profile / DshHome）
         shell: pwsh
@@ -197,6 +201,13 @@ jobs:
           New-Item -ItemType Directory -Force -Path $profileDir | Out-Null
           '[]' | Set-Content -Encoding utf8 (Join-Path $profileDir 'cordis.patch.yml')
           $mirror = Join-Path $cleanRoot 'mirror'
+          $seedWork = Join-Path $env:RUNNER_TEMP 'gts-first-install-seed'
+          git init -q -b main $seedWork
+          'gitea first-install smoke doc' | Set-Content -Encoding utf8 (Join-Path $seedWork 'README.md')
+          git -C $seedWork add README.md
+          git -C $seedWork -c user.email=ci@example.com -c user.name=ci commit -qm 'seed'
+          New-Item -ItemType Directory -Force -Path (Join-Path $mirror 'ci-owner') | Out-Null
+          git clone -q --bare $seedWork (Join-Path $mirror 'ci-owner\demo.git')
           & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $cleanRoot 'scripts\setup-windows.ps1') -Owners ci-owner -MirrorRoot $mirror -RegisterDsh -Profile desktop -DshHome $dsh
           if ($LASTEXITCODE -ne 0) { throw 'clean default installer failed' }
           & $venvPython -c 'import jieba'
@@ -209,6 +220,16 @@ jobs:
           } finally { Pop-Location }
           $patch = Get-Content -Raw (Join-Path $profileDir 'cordis.patch.yml')
           if ($patch -notmatch 'id: mcp-gitea-search') { throw 'profile was not registered' }
+          $env:GITEA_MIRROR_ROOT = $mirror
+          $env:GITEA_OWNERS = 'ci-owner'
+          $env:GITEA_SEARCH_CLI = Join-Path $venv 'Scripts\gts.exe'
+          $env:GTS_BIN = 'C:\nonexistent\broken-gts.exe'
+          $onboardOut = (& powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $cleanRoot 'scripts\onboarding.ps1') -Verify | Out-String)
+          if ($LASTEXITCODE -ne 0) { throw "onboarding.ps1 failed: $LASTEXITCODE`n$onboardOut" }
+          if ($onboardOut -notmatch 'Configuration: valid' -or $onboardOut -notmatch 'doctor-mcp\.ps1') { throw "unexpected onboarding.ps1 output:`n$onboardOut" }
+          Remove-Item Env:\GTS_BIN -ErrorAction SilentlyContinue
+          & powershell.exe -NoProfile -ExecutionPolicy Bypass -File (Join-Path $cleanRoot 'scripts\doctor-mcp.ps1') -Verify -Query gitea
+          if ($LASTEXITCODE -ne 0) { throw "doctor-mcp.ps1 failed: $LASTEXITCODE" }
 
   # ── W7/W8：运行时行为测试（锁排他 / 引号往返）在真实 Windows 上跑 ────────
   windows-tests:

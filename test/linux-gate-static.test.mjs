@@ -25,6 +25,7 @@ test('Linux gate strips ambient config aliases and enforces four-cell packaging 
     assert.match(gate, new RegExp(name));
   }
   assert.match(gate, /collect-test-counts\.py/);
+  assert.match(gate, /respawn-mcp\.sh --selftest/);
   assert.match(gate, /test-python-package\.py/);
   assert.match(gate, /test-npm-package\.mjs/);
   assert.match(gate, /check-public-hygiene\.py/);

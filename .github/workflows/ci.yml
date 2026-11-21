@@ -45,6 +45,7 @@ jobs:
           python3 -V
           node -v
           python3 scripts/collect-test-counts.py
+          bash scripts/respawn-mcp.sh --selftest
 
   package:
     name: Packaging (wheel + sdist + npm pack) & Hygiene
