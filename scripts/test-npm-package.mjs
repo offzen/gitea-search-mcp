@@ -102,6 +102,19 @@ function run(cmd, args, opts = {}) {
   return res;
 }
 
+function walkFiles(dir, relBase = '') {
+  const results = [];
+  for (const entry of fs.readdirSync(dir, { withFileTypes: true })) {
+    const rel = relBase ? `${relBase}/${entry.name}` : entry.name;
+    if (entry.isDirectory()) {
+      results.push(`${rel}/`, ...walkFiles(path.join(dir, entry.name), rel));
+    } else {
+      results.push(rel);
+    }
+  }
+  return results;
+}
+
 const scratch = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-npm-pack-test-'));
 try {
   const packDir = path.join(scratch, 'pack');
@@ -111,12 +124,18 @@ try {
   fs.mkdirSync(unpackDir, { recursive: true });
   fs.mkdirSync(neutralCwd, { recursive: true });
 
-  const npmCmd = IS_WIN ? 'npm.cmd' : 'npm';
-  run(npmCmd, ['pack', '--ignore-scripts', '--pack-destination', packDir], { cwd: ROOT });
-
-  const tarballs = fs.readdirSync(packDir).filter((f) => f.endsWith('.tgz'));
-  assert.equal(tarballs.length, 1, `Expected 1 .tgz tarball, found: ${tarballs.join(', ')}`);
-  const tarball = path.join(packDir, tarballs[0]);
+  const explicitTarball = process.argv[2] ? path.resolve(process.argv[2]) : null;
+  let tarball;
+  if (explicitTarball) {
+    assert.equal(fs.existsSync(explicitTarball), true, `Tarball argument not found: ${explicitTarball}`);
+    tarball = explicitTarball;
+  } else {
+    const npmCmd = IS_WIN ? 'npm.cmd' : 'npm';
+    run(npmCmd, ['pack', '--ignore-scripts', '--pack-destination', packDir], { cwd: ROOT });
+    const tarballs = fs.readdirSync(packDir).filter((f) => f.endsWith('.tgz'));
+    assert.equal(tarballs.length, 1, `Expected 1 .tgz tarball, found: ${tarballs.join(', ')}`);
+    tarball = path.join(packDir, tarballs[0]);
+  }
 
   extractTgz(tarball, unpackDir);
   const pkgRoot = path.join(unpackDir, 'package');
@@ -135,6 +154,15 @@ try {
     'lib/config.mjs',
     'lib/config.py',
     'lib/indexer.py',
+    'lib/mirror-state.mjs',
+    'lib/mirror_state.py',
+    'lib/next-actions.mjs',
+    'scripts/sync.sh',
+    'scripts/probe-stdio.mjs',
+    'scripts/doctor-mcp.sh',
+    'scripts/doctor-mcp.ps1',
+    'scripts/onboarding.sh',
+    'scripts/onboarding.ps1',
     'docs/USAGE.md',
     'docs/POST-INSTALL.md',
     'docs/OPERATIONS.md',
@@ -145,10 +173,26 @@ try {
     assert.equal(fs.existsSync(path.join(pkgRoot, rel)), true, `Missing required path in npm tarball: ${rel}`);
   }
 
-  // 2. Verify internal dev/test assets are NOT leaked into published npm tarball
-  for (const excluded of ['test', 'docs/dev', 'PROVENANCE.json', 'PROJECT-STATE.md', 'RELEASE-NOTES.md']) {
+  // 2. Verify internal dev/CI/test assets and Python bytecode caches are NOT leaked into published npm tarball
+  for (const excluded of [
+    'test',
+    'docs/dev',
+    'scripts/ci',
+    'scripts/test-npm-package.mjs',
+    'scripts/test-python-package.py',
+    'scripts/collect-test-counts.py',
+    'scripts/check-public-hygiene.py',
+    'scripts/run-e2e-test.sh',
+    'scripts/run-realdata-test.sh',
+    'PROVENANCE.json',
+    'PROJECT-STATE.md',
+    'RELEASE-NOTES.md',
+  ]) {
     assert.equal(fs.existsSync(path.join(pkgRoot, excluded)), false, `Excluded path leaked into npm tarball: ${excluded}`);
   }
+  const bundledEntries = walkFiles(pkgRoot);
+  const leakedBytecode = bundledEntries.filter((p) => p.includes('__pycache__') || /\.(pyc|pyo)$/i.test(p));
+  assert.deepEqual(leakedBytecode, [], `Python bytecode leaked into npm tarball: ${leakedBytecode.join(', ')}`);
 
   // Link existing node_modules offline so @modelcontextprotocol/sdk resolves without network access
   const rootNodeModules = path.join(ROOT, 'node_modules');
@@ -201,11 +245,11 @@ try {
 
   run(
     process.execPath,
-    [path.join(ROOT, 'scripts', 'probe-stdio.mjs'), path.join(pkgRoot, 'bin', 'mcp-server'), 'NpmPackSmokeToken'],
+    [path.join(pkgRoot, 'scripts', 'probe-stdio.mjs'), path.join(pkgRoot, 'bin', 'mcp-server'), 'NpmPackSmokeToken'],
     { cwd: neutralCwd, env },
   );
 
-  process.stdout.write(`NPM_PACK_OK: ${tarballs[0]} verified outside source checkout\n`);
+  process.stdout.write(`NPM_PACK_OK: ${path.basename(tarball)} verified outside source checkout\n`);
 } finally {
   fs.rmSync(scratch, { recursive: true, force: true });
 }

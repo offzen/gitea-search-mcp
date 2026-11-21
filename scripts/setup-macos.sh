@@ -20,7 +20,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
 ROOT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 
 MIRROR_ROOT="${GITEA_MIRROR_ROOT:-$ROOT_DIR/mirror}"
-OWNERS="${GITEA_OWNERS:-}"
+OWNERS="${GITEA_OWNERS:-${GITEA_OWNER:-${GITQ_OWNER:-}}}"
 VENV_DIR="${GITEA_VENV_PATH:-${GITQ_VENV_DIR:-$ROOT_DIR/.venv}}"
 PROFILE="Auto"
 INSTALL_DSH=0
@@ -32,10 +32,12 @@ while [ "$#" -gt 0 ]; do
   esac
   shift
 done
-if [ -z "$OWNERS" ] || [ "$OWNERS" = "myorg" ]; then
-  echo "CONFIG_ERROR: set GITEA_OWNERS to a real owner before installing." >&2
-  exit 2
-fi
+case "$OWNERS" in
+  ""|myorg|example-org|your-org|your-owner)
+    echo "CONFIG_ERROR: set GITEA_OWNERS to a real owner before installing." >&2
+    exit 2
+    ;;
+esac
 
 echo "=== gitea-search-mcp macOS 安装 ($ROOT_DIR) ==="
 

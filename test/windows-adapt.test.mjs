@@ -144,9 +144,11 @@ test('setup-windows.ps1 使用共享 profile patcher，避免手拼 YAML 路径'
   assert.doesNotMatch(ps, /Add-Content\s+-Path\s+\$patch/, '不应继续盲目追加重复 YAML block');
 });
 
-test('setup-windows.ps1 保持 UTF-8 BOM 并拒绝占位 Owner', () => {
+test('setup-windows.ps1 与 doctor-mcp.ps1 保持 UTF-8 BOM 并拒绝占位 Owner', () => {
   const bytes = fs.readFileSync(new URL('../scripts/setup-windows.ps1', import.meta.url));
   assert.deepEqual([...bytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
+  const doctorBytes = fs.readFileSync(new URL('../scripts/doctor-mcp.ps1', import.meta.url));
+  assert.deepEqual([...doctorBytes.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
   const ps = bytes.toString('utf8');
   assert.match(ps, /Parameter\(Mandatory=\$true\).*\$Owners/);
   assert.match(ps, /\[string\]\$DshHome/);

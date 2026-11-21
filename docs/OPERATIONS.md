@@ -153,11 +153,12 @@ pyinstaller --onedir --name gts --hidden-import=indexer --paths=lib bin\gts
 | `GITEA_ALLOW_NO_JIEBA` | `GITQ_ALLOW_NO_JIEBA` | `0` | 设为 `1` 时显式允许无 `jieba` 环境仅建英文索引 |
 | `GITEA_URL` | `GITEA_API_BASE` / `GITQ_API_BASE` | `https://git.example.com` | `sync.sh` 访问的 Gitea / Forgejo 实例地址 |
 | `GITEA_TOKEN` | `GITEA_API_TOKEN` / `GITQ_API_TOKEN` | — | `sync.sh` 使用的只读 API Token |
-| `GITQ_ENUM` / `GITQ_TRANSPORT` | — | `auto` | `sync.sh` 仓库枚举（`auto`/`api`/`ssh`）与克隆通道（`auto`/`ssh`/`https`） |
+| `GITEA_REMOTE` / `GITEA_SSH_HOST` | `GITQ_REMOTE` / `GITQ_SSH_HOST` | `gitea` / — | `sync.sh` SSH 克隆别名（`~/.ssh/config`）与可选 SSH 管理端枚举主机 |
+| `GITQ_ENUM` / `GITQ_TRANSPORT` / `GITQ_JOBS` | — | `auto` / `auto` / `6` | `sync.sh` 仓库枚举（`auto`/`api`/`ssh`）、克隆通道（`auto`/`ssh`/`https`）与并发度 |
 | `GITEA_MAX_RESULTS` | `GITQ_MAX_RESULTS` | `200`（硬上限 `1000`） | 单次搜索返回条数硬夹上限（工具默认请求 `5`） |
 | `GITEA_MAX_LINE_BYTES` | `GITQ_MAX_LINE_BYTES` | `2000` | 单行最大字节数（UTF-8 边界安全截断） |
 | `GITEA_MAX_SEARCH_BYTES` | `GITQ_MAX_SEARCH_BYTES` | `131072`（128 KiB） | 单次搜索总输出字节预算上限 |
-| `GITEA_MAX_READ_BYTES` | `GITQ_MAX_READ_BYTES` | `60000`（60 KiB） | `read_file` 单次读取字节上限 |
+| `GITEA_MAX_READ_BYTES` | `GITQ_MAX_READ_BYTES` | `60000`（60 KB） | `read_file` 单次读取字节上限 |
 | `GITEA_READ_DEFAULT_LINES` | `GITQ_READ_DEFAULT_LINES` | `400` | `read_file` 默认返回行数 |
 
 ---
@@ -168,7 +169,7 @@ pyinstaller --onedir --name gts --hidden-import=indexer --paths=lib bin\gts
    - 条数硬夹（默认返回 Top 5，最大硬夹至 `GITEA_MAX_RESULTS`）；
    - 单行 UTF-8 字节安全截断（默认 2000B，退续位不产生 `U+FFFD` 乱码）；
    - 单次搜索总字节预算熔断（默认 128 KiB）；
-   - `read_file` 窗口化切片读取（默认 400 行 / 60 KiB 上限）。
+   - `read_file` 窗口化切片读取（默认 400 行 / 60 KB 上限）。
 2. **Windows 子进程与跨平台执行护栏**：
    - 原生 `.exe` / `.com` 始终以 `shell: false` 直执行，完全绕过 `cmd.exe`；
    - 仅 `.cmd` / `.bat` 降级入口经 `cmd /d /s /c`：进入 shell 前先**拒绝 NUL、CR/LF** 以及会触发二次解析的 `% ! ^ & | < >`，其余参数再按 Windows 引号规则逐一定界（`/s` 仅控制外层引号剥离，不单独构成注入防护）；
@@ -193,15 +194,16 @@ pyinstaller --onedir --name gts --hidden-import=indexer --paths=lib bin\gts
 | **旧索引报错 `INDEX_REBUILD_REQUIRED`** | 本地索引仍为 `v1.2.2` 及更早的 `user_version=0/1`：运行 `gts --reindex --full` 重建 `owner/repo` 索引。 |
 | **Node 20.11~22.14 报缺 `sqlite3` / `zstd`** | 低版本 Node 回退依赖系统 CLI：安装系统 `sqlite3` 与 `zstd` 包，或升级至 Node 22.15+ LTS。 |
 | **Windows 报 `找不到可执行的 gts CLI`** | 执行 `python -m pip install ".[fts]"` 生成 `Scripts\gts.exe`，或将 `$env:GITEA_SEARCH_CLI` 设为单个 `.exe` 完整路径。 |
-| **修改配置或升级代码后宿主未生效** | MCP 为宿主常驻子进程：重载宿主（或运行 `bash scripts/respawn-mcp.sh` 平滑重启子进程）。 |
+| **修改配置或升级代码后宿主未生效** | MCP 为宿主常驻子进程：重载宿主（Linux 下亦可运行 `bash scripts/respawn-mcp.sh` 平滑重启子进程）。 |
 | **DSH `session-query.sqlite-wal` 体积过大** | 运行 `node scripts/dsh-session-health.mjs --fix` 执行在线 `PRAGMA wal_checkpoint(TRUNCATE)`。 |
 
-### 5.3 本地回归验证命令
+### 5.3 本地回归验证命令（源码仓库内执行）
 
 ```bash
-npm test            # Node 跨平台单元与协议契约测试（node --test）
-npm run test:python # Python 核心回归与文档/配置契约测试
-npm run test:e2e    # 31 项合成裸镜像与 MCP 全链路验收
-npm run test:all    # 一键运行上述三层完整测试集
-npm run test:pack   # 树外验证 npm pack 打包产物完整性与 stdio 探针
+npm test             # Node 跨平台单元与协议契约测试（node --test）
+npm run test:python  # Python 核心回归与文档/配置契约测试
+npm run test:e2e     # 31 项合成裸镜像与 MCP 全链路验收
+npm run test:all     # 一键运行上述三层完整测试集
+npm run test:pack    # 树外验证 npm pack 打包产物完整性与 stdio 探针
+npm run test:hygiene # 公开树敏感凭据/内网坐标与干净工作区扫描
 ```

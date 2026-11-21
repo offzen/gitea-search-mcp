@@ -16,7 +16,7 @@ case "${1:-}" in
   *) usage >&2; exit 2 ;;
 esac
 
-GTS="${GTS_BIN:-}"
+GTS="${GITEA_SEARCH_CLI:-${GTS_BIN:-}}"
 if [[ -z "$GTS" ]]; then
   if command -v gts >/dev/null 2>&1; then GTS="$(command -v gts)"; else GTS="$ROOT_DIR/bin/gts"; fi
 fi

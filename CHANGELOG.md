@@ -11,11 +11,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Colon-containing file paths in `git grep` (`D6`)**: switched content search in `bin/gts` to `git grep -n -z` (`\0`-delimited fields) and preserved full paths in `-l` (`files_only`) mode so POSIX filenames containing `:` (such as ISO-8601 session timestamps) are never split across path/line/text fields.
 - **`gts --doctor` `Overall` status aggregation (`D7`)**: degraded `overall_status` to `WARN` when `mirror_sync` reports `failed` or `invalid`, while keeping `unrecorded` mirrors (manual bare clones / Zero-Gitea demo) at `OK`.
 - **Hermetic test sandboxes (`P1④`)**: isolated `HOME`, `XDG_CONFIG_HOME`, `APPDATA`, and fixed `/usr/local/bin` CLI lookup probes across Node and Python tests so host installations never leak into or skip negative test cases.
+- **v2.x helper script parity**: updated `scripts/respawn-mcp.sh` to match `bin/mcp-server` and `src/index.js` entrypoints alongside `server.mjs`, aligned `GITEA_SEARCH_CLI` lookup in `scripts/onboarding.{sh,ps1}`, and unified placeholder-owner guards in `scripts/setup-macos.sh`.
 
 ### Changed
 - **Simplified release governance**: retired the in-tree `PROVENANCE.json` (`D → P`) dual-commit lock, private staging requirement, and duplicate `hosted-*-receipt` jobs in favor of public GitHub Actions Linux/macOS/Windows gates plus official Sigstore build provenance attestation (`.github/workflows/release.yml`), cutting CI runtime in half while retaining fail-closed test count floors (`scripts/collect-test-counts.py`).
-- **Four-cell artifact & public-hygiene gates (`P0③`)**: added `scripts/test-npm-package.mjs` (verifying `npm pack` tarballs outside the source checkout alongside Python `wheel` and `sdist`) and `scripts/check-public-hygiene.py`.
-- **Documentation layout & deduplication**: kept four standard root documents (`README.md`, `CHANGELOG.md`, `UPGRADING.md`, `CONTRIBUTING.md`), merged `RELEASE-NOTES.md` into `CHANGELOG.md`, distilled `MANUAL.md` into [`docs/OPERATIONS.md`](docs/OPERATIONS.md), and moved maintainer/architecture notes under [`docs/dev/`](docs/dev/ENGINEERING-NOTES.md) (excluded from published npm tarballs).
+- **Four-cell artifact & public-hygiene gates (`P0③`)**: added `scripts/test-npm-package.mjs` (verifying `npm pack` tarballs outside the source checkout alongside Python `wheel` and `sdist`, and guarding against Python bytecode or CI-only script leakage via an explicit `package.json#files` allowlist) and `scripts/check-public-hygiene.py`.
+- **Documentation layout & deduplication**: kept four standard root documents (`README.md`, `CHANGELOG.md`, `UPGRADING.md`, `CONTRIBUTING.md`), consolidated `RELEASE-NOTES.md` into `CHANGELOG.md`, distilled `MANUAL.md` into [`docs/OPERATIONS.md`](docs/OPERATIONS.md), and moved maintainer/architecture notes under [`docs/dev/`](docs/dev/ENGINEERING-NOTES.md) (excluded from published npm tarballs).
 
 ## [2.0.0] - 2026-11-21
 

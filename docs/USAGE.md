@@ -14,7 +14,7 @@
 3. **分清检索范围**：`search_code` 覆盖镜像中的全部本地分支；FTS `search_docs` 只索引每仓默认分支。两者都只覆盖已经推送并完成镜像同步的内容。
 
 > 💡 **能力公开边界与向后兼容说明**：  
-> 本项目 `v2.0.0` 标准开源发布的公共契约包含 4 个中性核心基础工具（`search_code`、`search_docs`、`read_file`、`list_repositories`）。为保障 `v1.2.x` 老用户平滑升级，`tools/call` 同时兼容 `search_gitea*` 与 `search_gitorca*` 两族旧名（保留至 `v3.0.0` 前，调用时仅在 stderr 输出废弃告警）。若您所在的特定部署环境通过上层网关封装了混合召回（如各类 `*_hybrid` 向量融合工具），请以宿主实际注册的扩展工具清单为准。
+> 本项目 `v2.x` 标准开源发布的公共契约包含 4 个中性核心基础工具（`search_code`、`search_docs`、`read_file`、`list_repositories`）。为保障 `v1.2.x` 老用户平滑升级，`tools/call` 同时兼容 `search_gitea*` 与 `search_gitorca*` 两族旧名（保留至 `v3.0.0` 前，调用时仅在 stderr 输出废弃告警）。若您所在的特定部署环境通过上层网关封装了混合召回（如各类 `*_hybrid` 向量融合工具），请以宿主实际注册的扩展工具清单为准。
 
 ---
 
@@ -212,7 +212,7 @@ bin/gts --reindex
 | `-l` / `-c` | 只列命中文件 / 每仓命中数排行 |
 | `-r <repo>` / `-b <branch>` / `-A` | 限定仓（可重复、逗号分隔、支持 `*`）/ 限定分支 / 连 tags 一起搜 |
 | `-D` / `--kind` | 文档与会话 FTS5 检索 / 分区过滤 `doc,session,config,script` |
-| `--reindex` / `--fts-stats` / `--perf-stats` | 增量建索引 / 索引统计 / 性能与 I/O 统计 |
+| `--reindex [--full]` / `--fts-stats` / `--perf-stats` | 增量（或全量安全重建）建索引 / 索引统计 / 性能与 I/O 统计 |
 | `--doctor` / `--dsh-home` | 索引与宿主会话健康诊断 / 指定宿主 `.dsh` 目录 |
 | `--config` / `--mirror-root` / `--owners` / `--show-effective-config` | 显式配置覆盖与最终配置来源展示 |
 | `--read <path>` | 直接读取 `-r` 指定仓内的文件 |

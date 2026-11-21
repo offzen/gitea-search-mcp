@@ -4,7 +4,7 @@ MCP 只规定服务端 `tools/list` 返回的裸工具名；宿主如何把它�
 
 ## 三个不同层级
 
-1. **MCP server 裸名**：本服务 `v2.0.0` 在 `tools/list` 中声明 4 个通用中性裸名：`search_code`、`search_docs`、`read_file`、`list_repositories`。JSON-RPC 直连该 server 时用这些名称。
+1. **MCP server 裸名**：本服务 `v2.x` 在 `tools/list` 中声明 4 个通用中性裸名：`search_code`、`search_docs`、`read_file`、`list_repositories`。JSON-RPC 直连该 server 时用这些名称。
 2. **宿主注册/函数名**：宿主为了避免多个 server 重名，可能加前缀、清洗 `serverName`、截断或哈希。例如某些 DSH 版本可能展示 `mcp__gitea-search__search_docs`，但这不是 MCP 规范保证的固定名称。
 3. **GUI 友好显示名**：可以是中文或自然语言描述，只用于展示，不一定可调用。
 
@@ -12,7 +12,7 @@ MCP 只规定服务端 `tools/list` 返回的裸工具名；宿主如何把它�
 
 `tools/list` 严格只返回 4 个标准中性裸名（不污染客户端工具表），而 `tools/call` 同时透明转发两族旧裸名并在 stderr 打印废弃告警：
 
-| v2.0.0 标准裸名 | v1.x 兼容别名 | 历史 `gitorca` 兼容别名 |
+| v2.x 标准裸名 | v1.x 兼容别名 | 历史 `gitorca` 兼容别名 |
 |---|---|---|
 | `search_code` | `search_gitea` | `search_gitorca` |
 | `search_docs` | `search_gitea_docs` | `search_gitorca_docs` |

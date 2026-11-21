@@ -166,8 +166,8 @@ git clone https://github.com/offzen/gitea-search-mcp.git
 cd gitea-search-mcp
 npm ci --no-audit --no-fund
 python3 -m pip install '.[fts]'
-# 可选使用一键脚本：bash scripts/setup.sh [--install-dsh --profile desktop]
-# macOS 使用 scripts/setup-macos.sh 的同名参数
+# 可选使用一键脚本：GITEA_OWNERS=my-org bash scripts/setup.sh [--install-dsh --profile desktop]
+# macOS 使用：GITEA_OWNERS=my-org bash scripts/setup-macos.sh [--install-dsh --profile desktop]
 
 # Windows（PowerShell，管理员非必需）
 git clone https://github.com/offzen/gitea-search-mcp.git
@@ -200,7 +200,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1 -Owners my-or
 - **[docs/BOUNDARIES.md](docs/BOUNDARIES.md)** —— 能力覆盖范围与明确不支持事项
 - **[docs/TOOL-NAMING.md](docs/TOOL-NAMING.md)** —— MCP 裸名、宿主注册名与 GUI 显示名的三层模型及别名过渡说明
 - **[CHANGELOG.md](CHANGELOG.md)** —— 版本演进记录
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** / **[docs/dev/RELEASE.md](docs/dev/RELEASE.md)** —— 贡献指南、测试门禁与发布流程
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** / **[docs/dev/RELEASE.md](docs/dev/RELEASE.md)** / **[docs/dev/ENGINEERING-NOTES.md](docs/dev/ENGINEERING-NOTES.md)** —— 贡献指南、发布流程与跨平台工程红线
 
 ---
 

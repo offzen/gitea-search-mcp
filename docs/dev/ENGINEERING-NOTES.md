@@ -33,7 +33,7 @@
 4. **跨平台锁对称与控制台 UTF-8 保护**：
    - `IndexLock` 在 Windows 使用 `msvcrt.locking`，`_acquire()` 与 `_release()` 前均须显式 `self.fd.seek(0)` 锁定首字节；
    - `bin/gts`、`lib/config.py` 与 `lib/indexer.py` 均通过 `reconfigure(encoding="utf-8", errors="backslashreplace")` 保护 Windows CP936/CP1252 下中文告警与输出不抛 `UnicodeEncodeError`；
-   - PowerShell 脚本（`scripts/setup-windows.ps1`）须保持 UTF-8 BOM 以兼容 Windows PowerShell 5.1。
+   - PowerShell 脚本（`scripts/setup-windows.ps1`、`scripts/doctor-mcp.ps1`）须保持 UTF-8 BOM 以兼容 Windows PowerShell 5.1。
 
 ---
 

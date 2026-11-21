@@ -12,7 +12,7 @@ Read-only post-install checks. Never syncs, indexes, edits profiles, or reloads 
 '@ | Write-Output
   exit 0
 }
-$gts = if ($env:GTS_BIN) { $env:GTS_BIN } else { (Get-Command gts -ErrorAction SilentlyContinue).Source }
+$gts = if ($env:GITEA_SEARCH_CLI) { $env:GITEA_SEARCH_CLI } elseif ($env:GTS_BIN) { $env:GTS_BIN } else { (Get-Command gts -ErrorAction SilentlyContinue).Source }
 if (-not $gts) { $gts = Join-Path $RootDir 'bin\gts' }
 if (-not (Test-Path -LiteralPath $gts -PathType Leaf)) {
   Write-Error "FAIL: gts CLI was not found: $gts. Run scripts\setup-windows.ps1 first."
@@ -43,7 +43,7 @@ $ftsDb = Join-Path (Join-Path $config.mirror_root 'state') 'gitea-fts.sqlite'
 Write-Output ("FTS index: " + $(if ($doctor.fts_index.exists) { 'present' } else { 'missing' }))
 Write-Output ("FTS alignment: " + $(if ($doctor.fts_index.aligned_1to1) { 'aligned' } else { 'check required' }))
 if (-not (Test-Path -LiteralPath $ftsDb)) { Write-Output 'Next (explicit write): after verifying the mirror, run gts --reindex.' }
-Write-Output "MCP check: node `"$RootDir\scripts\probe-stdio.mjs`" (checks standalone stdio server, not host registration)."
+Write-Output "MCP check: powershell -ExecutionPolicy Bypass -File `"$RootDir\scripts\doctor-mcp.ps1`" -Verify (checks standalone stdio server, not host registration)."
 Write-Output 'Apply/reload: host profile changes take effect after the DSH host reloads that profile.'
 Write-Output 'Rollback: restore the timestamped cordis.patch.yml backup, then reload the profile.'
 Write-Output 'No synchronization, indexing, profile mutation, or DSH restart was performed.'

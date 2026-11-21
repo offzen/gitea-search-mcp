@@ -18,6 +18,28 @@ def strip_fenced_code(text: str) -> str:
     return FENCED_BLOCK_RE.sub("", text)
 
 
+def github_heading_slugs(text: str) -> set[str]:
+    body = strip_fenced_code(text)
+    slugs: set[str] = set()
+    counts: dict[str, int] = {}
+    for match in re.finditer(r"^(#{1,6})\s+(.+?)\s*$", body, re.MULTILINE):
+        raw = match.group(2).strip()
+        raw = re.sub(r"`([^`]*)`", r"\1", raw)
+        raw = re.sub(r"!\[([^\]]*)\]\([^)]*\)", r"\1", raw)
+        raw = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", raw)
+        chars: list[str] = []
+        for ch in raw.lower():
+            if ch in (" ", "-"):
+                chars.append("-")
+            elif ch.isalnum() or ch == "_":
+                chars.append(ch)
+        slug = "".join(chars)
+        seen = counts.get(slug, 0)
+        counts[slug] = seen + 1
+        slugs.add(slug if seen == 0 else f"{slug}-{seen}")
+    return slugs
+
+
 class DocumentationContractTest(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
@@ -42,7 +64,7 @@ class DocumentationContractTest(unittest.TestCase):
         ):
             self.assertTrue((ROOT / expected).is_file(), f"Missing expected doc: {expected}")
 
-    def test_all_relative_markdown_links_resolve(self) -> None:
+    def test_all_relative_markdown_links_and_anchors_resolve(self) -> None:
         doc_files = [
             ROOT / "README.md",
             ROOT / "CHANGELOG.md",
@@ -51,20 +73,40 @@ class DocumentationContractTest(unittest.TestCase):
             *sorted((ROOT / "docs").glob("*.md")),
             *sorted((ROOT / "docs" / "dev").glob("*.md")),
         ]
+        slug_cache: dict[pathlib.Path, set[str]] = {
+            doc.resolve(): github_heading_slugs(doc.read_text(encoding="utf-8"))
+            for doc in doc_files
+        }
         for doc in doc_files:
             body = strip_fenced_code(doc.read_text(encoding="utf-8"))
             for raw_target in MARKDOWN_LINK_RE.findall(body):
                 target = raw_target.strip().split()[0]
-                if target.startswith(("http://", "https://", "mailto:", "#")):
+                if target.startswith(("http://", "https://", "mailto:")):
                     continue
-                rel_path = target.split("#", 1)[0]
-                if not rel_path:
-                    continue
-                resolved = (doc.parent / rel_path).resolve()
+                rel_path, sep, fragment = target.partition("#")
+                resolved = doc.resolve() if not rel_path else (doc.parent / rel_path).resolve()
                 self.assertTrue(
                     resolved.exists(),
                     f"Broken relative link in {doc.relative_to(ROOT)}: {raw_target!r} -> {resolved}",
                 )
+                if sep and fragment and resolved.suffix.lower() == ".md":
+                    slugs = slug_cache.setdefault(
+                        resolved,
+                        github_heading_slugs(resolved.read_text(encoding="utf-8")),
+                    )
+                    self.assertIn(
+                        fragment.lower(),
+                        slugs,
+                        f"Broken heading anchor in {doc.relative_to(ROOT)}: {raw_target!r} (available: {sorted(slugs)})",
+                    )
+
+    def test_readme_badge_and_changelog_header_match_package_version(self) -> None:
+        pkg = json.loads(self.read("package.json"))
+        version = pkg["version"]
+        readme = self.read("README.md")
+        changelog = self.read("CHANGELOG.md")
+        self.assertIn(f"Version-v{version}-blue", readme)
+        self.assertRegex(changelog, rf"(?m)^## \[{re.escape(version)}\](?:\s|$)")
 
     def test_readme_and_changelog_stay_free_of_retired_governance_jargon(self) -> None:
         readme = self.read("README.md")

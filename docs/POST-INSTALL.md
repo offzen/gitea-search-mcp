@@ -101,8 +101,8 @@ MCP 裸工具名为 `search_code`、`search_docs`、`read_file`、`list_reposito
 ## 平台说明
 
 - Linux/macOS：`bash scripts/sync.sh -q` 是显式同步入口；macOS 默认数据目录包含 `Application Support` 空格，命令与 profile 路径须保留引号。
-- Windows：`gts` 应使用 `pip install .` 生成的 `gts.exe`。`sync.sh` 是 Bash 脚本，不由 PowerShell 原生执行；需要同步时使用 Git Bash，或使用已配置的 Git 镜像流程。
+- Windows：`gts` 应使用 `pip install ".[fts]"` 生成的 `gts.exe`。`sync.sh` 是 Bash 脚本，不由 PowerShell 原生执行；需要同步时使用 Git Bash，或使用已配置的 Git 镜像流程。
 - npm 安装不会生成 `gts` CLI；本项目的 npm 依赖只提供 MCP Node SDK。Python wheel/sdist 用 Python 安装器管理 CLI。
-- 配置示例请用 YAML 单引号；Windows 路径优先写正斜杠，例如 `'C:/Users/name/.../gts.exe'`，并确认最终 `GTS_BIN` 字面量路径确实存在。
+- 配置示例请用 YAML 单引号；Windows 路径优先写正斜杠，例如 `'C:/Users/name/.../gts.exe'`，并确认最终 `GITEA_SEARCH_CLI`（兼容 `GTS_BIN`）字面量路径确实存在。
 
 查看更多：[`OPERATIONS.md`](OPERATIONS.md)、[`USAGE.md`](USAGE.md)、[`TOOL-NAMING.md`](TOOL-NAMING.md)。
