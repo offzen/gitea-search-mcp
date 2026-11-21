@@ -19,12 +19,14 @@ We actively welcome community contributions, bug reports, and pull requests!
    - Python 3.10+ with sqlite3, jieba and PyYAML (`python3 -m pip install jieba PyYAML`)
    - Git 2.25+
 3. **Run Tests Locally**:
-   Before submitting changes, install Node dependencies and run the same default chain used by the release counter:
+   Before submitting changes, install Node dependencies and run the full test, packaging, and hygiene checks:
    ```bash
-   npm install
+   npm ci
    PYTHONDONTWRITEBYTECODE=1 npm run test:all
+   npm run test:pack
+   npm run test:hygiene
    ```
-   This runs Node tests, all explicit Python contract/regression suites, and the 31-assertion E2E test. Missing PyYAML is a failure, not a skip. For release-candidate freezing and the exact-SHA receipt contract, see [docs/DEVELOPMENT-AND-RELEASE.md](docs/DEVELOPMENT-AND-RELEASE.md).
+   This runs Node tests, all explicit Python contract/regression suites, the 31-assertion E2E test, isolated `npm pack` verification, and public-tree hygiene checks. Missing `PyYAML` or `jieba` is a failure, not a skip. For maintainer release steps, see [docs/dev/RELEASE.md](docs/dev/RELEASE.md).
 4. **Submit a Pull Request**:
    - Provide a clear summary of what was fixed or added.
    - Reference any related issues or discussions.

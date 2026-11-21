@@ -3,7 +3,7 @@
 > 新安装请先读 [`POST-INSTALL.md`](POST-INSTALL.md) 完成镜像、索引与 MCP 验收；能力边界见 [`BOUNDARIES.md`](BOUNDARIES.md)。
 
 > 本文聚焦于**如何高效使用**：四个核心工具的功能定位、入参规范、省上下文调用法则以及真实工作流场景。
-> 生产部署与高可用运维参见 [MANUAL.md](../MANUAL.md)；MCP 工具名前缀机制解析参见 [TOOL-NAMING.md](TOOL-NAMING.md)。
+> 生产部署与高可用运维参见 [OPERATIONS.md](OPERATIONS.md)；MCP 工具名前缀机制解析参见 [TOOL-NAMING.md](TOOL-NAMING.md)。
 
 ---
 

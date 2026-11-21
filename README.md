@@ -2,13 +2,11 @@
 
 [![License](https://img.shields.io/badge/License-Apache--2.0-C21325)](LICENSE)
 [![CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions/workflows/ci.yml)
-[![Windows CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions)
-[![Version](https://img.shields.io/badge/Version-v2.0.0-blue)](RELEASE-NOTES.md)
+[![Windows CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml)
+[![Version](https://img.shields.io/badge/Version-v2.0.1-blue)](CHANGELOG.md)
 [![Archive](https://img.shields.io/badge/Archive-v0.1.1%20(Pure%20Node)-orange)](https://github.com/offzen/gitea-search-mcp/tree/legacy-0.1.x)
-[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(Native)-brightgreen)](MANUAL.md#3-多场景部署流程)
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(Native)-brightgreen)](docs/OPERATIONS.md#1-多场景部署与定时同步)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20.11-success)](package.json)
-
-> 本仓库文档描述 `v2.0.0` 的版本内容；正式发布状态以对应 Release 记录为准，验收结论以同一 exact-SHA 的 provenance、收据与严格预检为准。版本号本身不证明工作树已通过发布门禁。历史稳定版 `v1.2.2` 已于 2026-11-11 正式发布，`v1.2.3` 已完成发布。
 
 **面向任意 MCP 宿主的通用 Gitea / Forgejo / 本地 Git 裸镜像混合检索 MCP Server**（支持 **Claude Desktop**、**Cursor**、**Cline**、**Windsurf**、**Codex**、**DeepSeek Harness (DSH)** 等）：把 Gitea/Forgejo 上全部仓库（或任意本地 bare Git 镜像）维护在宿主机本地，让 AI Agent 一次工具调用即可精准定位全仓代码、文档、配置与历史排障记录——不用逐个 clone、不把大文件塞进上下文、防止海量噪音稀释模型注意力。
 
@@ -80,7 +78,7 @@
           GITEA_OWNERS: "my-org,my-team"
 ```
 
-> **配置边界与平滑迁移**：运行时 CLI/MCP/indexer 只从 `config.json` 读取 `mirror_root` 与 `owners`；同步 URL、token、枚举/传输策略及输出护栏仍由环境变量控制。推荐把共享运行时配置放在 `~/.config/gitea-search-mcp/config.json`（若新路径不存在会自动回退读取旧 `~/.config/dsh-gitea-search/config.json` 并在 stderr 提示迁移），或用 `GITEA_SEARCH_CONFIG` 显式指定。详见 [MANUAL §5](MANUAL.md#5-配置参数全表参考) 与 [UPGRADING.md](UPGRADING.md)。
+> **配置边界与平滑迁移**：运行时 CLI/MCP/indexer 只从 `config.json` 读取 `mirror_root` 与 `owners`；同步 URL、token、枚举/传输策略及输出护栏仍由环境变量控制。推荐把共享运行时配置放在 `~/.config/gitea-search-mcp/config.json`（若新路径不存在会自动回退读取旧 `~/.config/dsh-gitea-search/config.json` 并在 stderr 提示迁移），或用 `GITEA_SEARCH_CONFIG` 显式指定。详见 [docs/OPERATIONS.md §3](docs/OPERATIONS.md#3-配置参数全表参考) 与 [UPGRADING.md](UPGRADING.md)。
 
 ### 💡 核心接入避坑指南
 
@@ -95,7 +93,7 @@
 
 MCP server `tools/list` 仅声明以下 4 个通用中性裸工具名；同时 `tools/call` 透明兼容 `v1.x`（`search_gitea*`）与历史（`search_gitorca*`）两族旧名（保留至 `v3.0.0` 前，调用旧名时仅在 stderr 输出废弃告警）：
 
-| MCP 裸名（v2.0.0） | 兼容旧名（`tools/call` 自动转发） | 核心能力 |
+| MCP 裸名（v2.x） | 兼容旧名（`tools/call` 自动转发） | 核心能力 |
 |---|---|---|
 | `search_code` | `search_gitea` / `search_gitorca` | 跨所有镜像仓与全部分支检索代码内容 / 文件路径 / 提交信息 |
 | `search_docs` | `search_gitea_docs` / `search_gitorca_docs` | 默认分支上的 SQLite FTS5 文档、会话、配置、脚本检索 |
@@ -158,7 +156,7 @@ bin/gts -D --kind doc,script "caddy"  # 按分区过滤：只检索文档与脚�
 - **Git ≥ 2.25**；
 - **平台支持**：原生跨平台兼容 Linux、macOS 与 Windows（10+ / Server 2019+）。
 
-> 📖 **安装与闭环验收**：详细部署参见 **[MANUAL.md §3](MANUAL.md#3-多场景部署流程)**；安装后按 **[docs/POST-INSTALL.md](docs/POST-INSTALL.md)** 完成首次同步、索引检查、独立 MCP 探针、宿主重载和实际工具调用。
+> 📖 **安装与闭环验收**：详细部署参见 **[docs/OPERATIONS.md §1](docs/OPERATIONS.md#1-多场景部署与定时同步)**；安装后按 **[docs/POST-INSTALL.md](docs/POST-INSTALL.md)** 完成首次同步、索引检查、独立 MCP 探针、宿主重载和实际工具调用。
 
 ### 三平台上手命令
 
@@ -178,34 +176,31 @@ powershell -ExecutionPolicy Bypass -File scripts\setup-windows.ps1 -Owners my-or
 # 复核计划后去掉 -WhatIf；接入 DSH 时再显式加 -RegisterDsh -Profile desktop/web/headless
 ```
 
-> 📦 **发行渠道说明**：npm 上的 `dsh-gitea-search@0.1.1`（MIT、纯 Node、另一维护者 `rayuai`）是早期遗留原型，与当前 Apache-2.0 代码库无关；PyPI 亦无官方包。请从本仓库源码或经哈希核验的 Release 制品安装 —— `pip install '.[fts]'` 走本地源码。
+> 📦 **发行渠道说明**：npm 上的 `dsh-gitea-search@0.1.1`（MIT、纯 Node、另一维护者 `rayuai`）是早期遗留原型，与当前 Apache-2.0 代码库无关；PyPI 亦无官方包。请从本仓库源码或带有 GitHub Attestation 签名的 Release 制品安装 —— `pip install '.[fts]'` 走本地源码。
 
 ---
 
 ## Windows 原生跨平台支持
 
-`v2.0.0` 完整继承自 `v1.2.2`/`v1.2.3` 的原生 Windows 适配：
+本项目原生适配 Windows（无需 WSL）：
 - **原生 PE 执行入口**：通过标准 `pip install '.[fts]'` 生成原生 `Scripts\gts.exe` PE 启动器，免管理员权限直接运行；
 - **防注入命令安全与环境自适配**：`.exe` / `.com` 直执行；批处理降级模式先拒绝 shell 元字符与换行，再执行参数定界；自动穿透系统 `PATH`、venv 与 Scoop；
-- **跨平台证据边界**：历史提交的成功或未完结记录均只属于各自 exact SHA，不说明后续树的状态。任何代码、版本或文档改动都需重新冻结 D/P，在明确批准的私有 GitHub staging 获取新 exact P 的 Linux/macOS/Windows 收据并完成 strict joint preflight；正式发布仍需独立决定。
+- **平台感知路径与排他锁**：Windows 侧归一化 `\` → `/`，POSIX 侧保留合法文件名反斜杠；`msvcrt.locking` 与 `fcntl.flock` 对称互斥。
 
-详见 **[WINDOWS-PORT.md](WINDOWS-PORT.md)** 与 **[MANUAL.md §3.3](MANUAL.md#33-场景-c原生-windows-环境部署)**。
+部署步骤见 **[docs/OPERATIONS.md §1.3](docs/OPERATIONS.md#13-原生-windows-环境部署)**，底层跨平台架构细节见 **[docs/dev/ENGINEERING-NOTES.md](docs/dev/ENGINEERING-NOTES.md)**。
 
 ---
 
 ## 文档导航
 
-- **[UPGRADING.md](UPGRADING.md)** —— 从 `v1.2.x`（`dsh-gitea-search`）平滑升级到 `v2.0.0`（`gitea-search-mcp`）的完整指引与回滚手册
-- **[PROJECT-STATE.md](PROJECT-STATE.md)** —— v2.0.0 版本内容与证据规则、历史快照与仓库角色
+- **[UPGRADING.md](UPGRADING.md)** —— 从 `v1.2.x`（`dsh-gitea-search`）平滑升级到 `v2.x`（`gitea-search-mcp`）的完整指引与回滚手册
 - **[docs/POST-INSTALL.md](docs/POST-INSTALL.md)** —— 安装后的完整闭环：只读预检、首次同步、索引、独立 MCP、宿主工具表、实际搜索与回滚
-- **[docs/BOUNDARIES.md](docs/BOUNDARIES.md)** —— 能力覆盖范围与明确不支持事项
 - **[docs/USAGE.md](docs/USAGE.md)** —— 四个工具参数速查、真实检索场景示范与防爆窗调用范例
-- **[WINDOWS-PORT.md](WINDOWS-PORT.md)** —— Windows 原生跨平台技术架构、安全护栏设计与移植规范
+- **[docs/OPERATIONS.md](docs/OPERATIONS.md)** —— 生产部署、Cron 定时同步、四层输出护栏、配置参数全表与故障排查手册
+- **[docs/BOUNDARIES.md](docs/BOUNDARIES.md)** —— 能力覆盖范围与明确不支持事项
 - **[docs/TOOL-NAMING.md](docs/TOOL-NAMING.md)** —— MCP 裸名、宿主注册名与 GUI 显示名的三层模型及别名过渡说明
-- **[docs/DEVELOPMENT-AND-RELEASE.md](docs/DEVELOPMENT-AND-RELEASE.md)** —— gate2/Linux 与 GitHub hosted clean-platform 门禁、D/P 候选及 exact-SHA receipt 契约
-- **[MANUAL.md](MANUAL.md)** —— 生产级高可用部署、Cron 定时同步、四层安全护栏机制、参数全表与故障排查手册
-- **[CHANGELOG.md](CHANGELOG.md)** / **[RELEASE-NOTES.md](RELEASE-NOTES.md)** —— 版本演进记录
-- **[CONTRIBUTING.md](CONTRIBUTING.md)** —— 开发者贡献、测试与独立发布准则
+- **[CHANGELOG.md](CHANGELOG.md)** —— 版本演进记录
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** / **[docs/dev/RELEASE.md](docs/dev/RELEASE.md)** —— 贡献指南、测试门禁与发布流程
 
 ---
 

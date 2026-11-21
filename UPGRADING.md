@@ -1,6 +1,8 @@
-# 升级指南：从 v1.2.x（`dsh-gitea-search`）升级到 v2.0.0（`gitea-search-mcp`）
+# 升级指南：从 v1.2.x（`dsh-gitea-search`）升级到 v2.x（`gitea-search-mcp`）
 
-`v2.0.0` 将项目从 DeepSeek Harness (DSH) 专属插件演进为**面向任意 MCP 宿主的通用 Gitea / Forgejo / 本地 Git 裸镜像检索引擎**（支持 Claude Desktop、Cursor、Cline、Windsurf、Codex、DSH 等），同时完整继承 `v1.2.3` 的跨平台（Linux / macOS / 原生 Windows）可靠性修复。
+`v2.0+` 将项目从 DeepSeek Harness (DSH) 专属插件演进为**面向任意 MCP 宿主的通用 Gitea / Forgejo / 本地 Git 裸镜像检索引擎**（支持 Claude Desktop、Cursor、Cline、Windsurf、Codex、DSH 等），同时完整继承 `v1.2.3` 的跨平台（Linux / macOS / 原生 Windows）可靠性修复。
+
+> 注：已运行 `v2.0.0` 的用户升级至 `v2.0.1` 无需修改任何配置或重建索引，直接拉取新 Tag 重载宿主即可。
 
 本版本为老用户提供**平滑兼容过渡期**：旧工具名、旧环境变量、旧默认配置路径与 CLI 别名均保留至 `v3.0.0` 之前。
 

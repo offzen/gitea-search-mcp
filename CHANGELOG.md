@@ -5,13 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [2.0.0]
+## [2.0.1]
 
-This entry describes the v2.0.0 convergence changes, not their live publication status.
-Evidence for v1.2.3, v1.2.2, or any earlier candidate does not validate a later
-tracked tree. Each final content commit requires its own provenance-only commit,
-exact-commit platform evidence, and a separate release decision. Consult the
-corresponding exact-commit evidence and release record for the final status.
+### Fixed
+- **Colon-containing file paths in `git grep` (`D6`)**: switched content search in `bin/gts` to `git grep -n -z` (`\0`-delimited fields) and preserved full paths in `-l` (`files_only`) mode so POSIX filenames containing `:` (such as ISO-8601 session timestamps) are never split across path/line/text fields.
+- **`gts --doctor` `Overall` status aggregation (`D7`)**: degraded `overall_status` to `WARN` when `mirror_sync` reports `failed` or `invalid`, while keeping `unrecorded` mirrors (manual bare clones / Zero-Gitea demo) at `OK`.
+- **Hermetic test sandboxes (`P1④`)**: isolated `HOME`, `XDG_CONFIG_HOME`, `APPDATA`, and fixed `/usr/local/bin` CLI lookup probes across Node and Python tests so host installations never leak into or skip negative test cases.
+
+### Changed
+- **Simplified release governance**: retired the in-tree `PROVENANCE.json` (`D → P`) dual-commit lock, private staging requirement, and duplicate `hosted-*-receipt` jobs in favor of public GitHub Actions Linux/macOS/Windows gates plus official Sigstore build provenance attestation (`.github/workflows/release.yml`), cutting CI runtime in half while retaining fail-closed test count floors (`scripts/collect-test-counts.py`).
+- **Four-cell artifact & public-hygiene gates (`P0③`)**: added `scripts/test-npm-package.mjs` (verifying `npm pack` tarballs outside the source checkout alongside Python `wheel` and `sdist`) and `scripts/check-public-hygiene.py`.
+- **Documentation layout & deduplication**: kept four standard root documents (`README.md`, `CHANGELOG.md`, `UPGRADING.md`, `CONTRIBUTING.md`), merged `RELEASE-NOTES.md` into `CHANGELOG.md`, distilled `MANUAL.md` into [`docs/OPERATIONS.md`](docs/OPERATIONS.md), and moved maintainer/architecture notes under [`docs/dev/`](docs/dev/ENGINEERING-NOTES.md) (excluded from published npm tarballs).
+
+## [2.0.0] - 2026-11-21
 
 ### Added
 - Universal MCP Server packaging & entrypoint separation (`gitea-search-mcp`):
@@ -41,13 +47,7 @@ corresponding exact-commit evidence and release record for the final status.
 - Refreshed `README.md` for universal MCP hosts (Claude Desktop, Cursor, Cline,
   Windsurf, Codex, DSH) and documented local bare Git mirror onboarding.
 
-## [1.2.3]
-
-This entry describes the v1.2.3 changes, not their live publication status.
-Evidence for v1.2.2 or any earlier v1.2.3 candidate does not validate a later
-tracked tree. Each final content commit requires its own provenance-only commit,
-exact-commit platform evidence, and a separate release decision. Consult the
-corresponding exact-commit evidence and release record for the final status.
+## [1.2.3] - 2026-11-15
 
 ### Fixed
 - Align npm, Python, lockfile and MCP version metadata to v1.2.3; distinguish

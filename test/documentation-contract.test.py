@@ -1,116 +1,80 @@
 #!/usr/bin/env python3
-"""Static contracts keeping release documentation aligned with code."""
+"""Static contracts keeping repository documentation layout, links, and capability boundaries aligned with code."""
 from __future__ import annotations
 
+import importlib.util
+import json
 import pathlib
+import re
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+FENCED_BLOCK_RE = re.compile(r"```[\s\S]*?```")
+MARKDOWN_LINK_RE = re.compile(r"!?\[[^\]]*\]\(([^)]+)\)")
+
+
+def strip_fenced_code(text: str) -> str:
+    return FENCED_BLOCK_RE.sub("", text)
 
 
 class DocumentationContractTest(unittest.TestCase):
     def read(self, relative: str) -> str:
         return (ROOT / relative).read_text(encoding="utf-8")
 
-    def test_release_guide_names_current_contract(self) -> None:
-        guide = self.read("docs/DEVELOPMENT-AND-RELEASE.md")
-        for value in ("schema 3", "schema 2", "--expected-ref", "--expected-hosted-repository", "--trust-anchor", "--artifact", "same-party"):
-            with self.subTest(value=value):
-                self.assertIn(value, guide)
-        self.assertNotIn("schema-1", guide)
-        self.assertNotIn("two independent CI planes", guide)
+    def test_root_markdown_layout_stays_minimal_and_clean(self) -> None:
+        root_mds = sorted(p.name for p in ROOT.glob("*.md"))
+        self.assertEqual(
+            root_mds,
+            ["CHANGELOG.md", "CONTRIBUTING.md", "README.md", "UPGRADING.md"],
+            f"Root directory should keep only the 4 standard open-source .md files; found: {root_mds}",
+        )
+        for retired in ("RELEASE-NOTES.md", "PROJECT-STATE.md", "MANUAL.md", "WINDOWS-PORT.md", "WIKI.md", "CODE-INDEX.md"):
+            self.assertFalse((ROOT / retired).exists(), f"Retired root document must not return: {retired}")
+        for expected in (
+            "docs/USAGE.md",
+            "docs/POST-INSTALL.md",
+            "docs/OPERATIONS.md",
+            "docs/BOUNDARIES.md",
+            "docs/TOOL-NAMING.md",
+            "docs/dev/RELEASE.md",
+            "docs/dev/ENGINEERING-NOTES.md",
+        ):
+            self.assertTrue((ROOT / expected).is_file(), f"Missing expected doc: {expected}")
 
-    def test_formal_state_and_retired_review_boundary(self) -> None:
-        state = self.read("PROJECT-STATE.md")
-        self.assertIn("private prerelease", state)
-        self.assertIn("remote/tag promotion remains **deferred**", state)
-        self.assertFalse((ROOT / "docs/RC5-REVIEW.md").exists())
+    def test_all_relative_markdown_links_resolve(self) -> None:
+        doc_files = [
+            ROOT / "README.md",
+            ROOT / "CHANGELOG.md",
+            ROOT / "UPGRADING.md",
+            ROOT / "CONTRIBUTING.md",
+            *sorted((ROOT / "docs").glob("*.md")),
+            *sorted((ROOT / "docs" / "dev").glob("*.md")),
+        ]
+        for doc in doc_files:
+            body = strip_fenced_code(doc.read_text(encoding="utf-8"))
+            for raw_target in MARKDOWN_LINK_RE.findall(body):
+                target = raw_target.strip().split()[0]
+                if target.startswith(("http://", "https://", "mailto:", "#")):
+                    continue
+                rel_path = target.split("#", 1)[0]
+                if not rel_path:
+                    continue
+                resolved = (doc.parent / rel_path).resolve()
+                self.assertTrue(
+                    resolved.exists(),
+                    f"Broken relative link in {doc.relative_to(ROOT)}: {raw_target!r} -> {resolved}",
+                )
 
-    def test_private_coordinates_are_runtime_only(self) -> None:
-        fetcher = self.read("scripts/fetch-remote-evidence.py")
-        preflight = self.read("scripts/release-preflight.py")
-        state = self.read("PROJECT-STATE.md")
-        for value in ("--forge-api-base", "--repository"):
-            self.assertIn(value, fetcher)
-        self.assertNotIn("GITEA_BASE =", fetcher)
-        self.assertNotIn("GITEA_REPO =", fetcher)
-        self.assertIn("--expected-gate2-repository", preflight)
-        self.assertIn("--expected-hosted-repository", preflight)
-        self.assertNotIn("GITEA_REPOSITORY =", preflight)
-        self.assertNotIn("GITHUB_REPOSITORY =", preflight)
-        self.assertNotIn("GITHUB_REPO =", fetcher)
-        self.assertIn("intentionally supplied at runtime", state)
-
-    def test_private_hosted_before_publication_order_is_explicit(self) -> None:
-        guide = self.read("docs/DEVELOPMENT-AND-RELEASE.md")
-        state = self.read("PROJECT-STATE.md")
+    def test_readme_and_changelog_stay_free_of_retired_governance_jargon(self) -> None:
         readme = self.read("README.md")
-        self.assertIn("public project is not a pre-release test bed", guide)
-        self.assertIn("private GitHub hosted-staging ref", guide)
-        self.assertIn("Public refs are not a pre-release test bed", state)
-        self.assertIn("私有 GitHub staging", readme)
+        for retired_phrase in ("exact-SHA 的 provenance", "私有 GitHub staging", "重新冻结 D/P", "版本号本身不证明工作树已通过发布门禁"):
+            self.assertNotIn(retired_phrase, readme)
+        changelog_top = self.read("CHANGELOG.md").split("## [1.2.2]", 1)[0]
+        self.assertNotIn("not their live publication status", changelog_top)
+        self.assertNotIn("provenance-only commit", changelog_top)
 
-    def test_windows_docs_do_not_overclaim_cmd_quoting(self) -> None:
-        manual = self.read("MANUAL.md")
-        windows = self.read("WINDOWS-PORT.md")
-        self.assertIn("拒绝 NUL、CR/LF", manual)
-        self.assertIn("拒绝 NUL、CR 与 LF", windows)
-        self.assertNotIn("彻底防御搜索词中恶意注入", manual)
-        self.assertNotIn("Python 3.15", windows)
-
-    def test_default_python_chain_documents_dependency_boundary(self) -> None:
-        package = self.read("package.json")
-        guide = self.read("CODE-INDEX.md")
-        counter = self.read("scripts/collect-test-counts.py")
-        gate2 = self.read(".gitea/workflows/ci.yml")
-        for suite in ("linux-gate-context", "dependency-missing", "profile-yaml", "repo-zero-hit", "documentation-contract"):
-            with self.subTest(suite=suite):
-                self.assertIn(f"test/{suite}.test.py", package)
-                self.assertIn(f"test/{suite}.test.py", counter)
-        self.assertIn("依赖 PyYAML，缺失时门禁失败", guide)
-        self.assertIn("--upgrade build jieba PyYAML", gate2)
-        self.assertIn("Gitea does not provide that GitHub-only variable", self.read("docs/DEVELOPMENT-AND-RELEASE.md"))
-
-    def test_released_122_123_and_v200_snapshot_stay_truthful(self) -> None:
-        readme = self.read("README.md")
-        changelog = self.read("CHANGELOG.md")
-        notes = self.read("RELEASE-NOTES.md")
-        guide = self.read("docs/DEVELOPMENT-AND-RELEASE.md")
-        state = self.read("PROJECT-STATE.md")
-        upgrading = self.read("UPGRADING.md")
-        self.assertIn("## [2.0.0]\n", changelog)
-        self.assertIn("## [1.2.3]\n", changelog)
-        self.assertNotIn("[1.2.3] - Unreleased", changelog)
-        self.assertIn("not their live publication status", changelog)
-        self.assertIn("[1.2.2] - 2026-11-11", changelog)
-        self.assertNotIn("[1.2.2] - Unreleased", changelog)
-        self.assertNotIn("No public stable `v1.2.2` tag or Release exists", changelog)
-        self.assertIn("Version-v2.0.0-blue", readme)
-        self.assertIn("正式发布状态以对应 Release 记录为准", readme)
-        self.assertNotIn("Version-v1.2.3%20candidate", readme)
-        self.assertNotIn("未发布候选", readme)
-        self.assertIn("v1.2.2` 已于 2026-11-11 正式发布", readme)
-        self.assertNotIn("它仍是目标版本而非已发布稳定版", readme)
-        self.assertIn("## v2.0.0 — universal MCP server convergence", notes)
-        self.assertIn("## v1.2.3 — correctness and release-state documentation", notes)
-        self.assertNotIn("v1.2.3 candidate (Unreleased)", notes)
-        self.assertIn("release record, not this tracked snapshot", notes)
-        self.assertIn("v1.2.2 stable (2026-11-11)", notes)
-        self.assertIn("--expected-ref refs/heads/release/<exact-p-candidate>", guide)
-        self.assertNotIn("--expected-ref refs/tags/v1.2.2", guide)
-        self.assertIn("Historical snapshot", state)
-        self.assertIn("v1.2.2 was released on 2026-11-11", state)
-        self.assertIn("# Project state — v2.0.0 (tracked snapshot)", state)
-        self.assertIn("gitea-search-mcp", state)
-        self.assertIn("Historical archive boundary", state)
-        self.assertIn("Historical v1.2.2 candidate snapshot (2026-11-09)", state)
-        self.assertNotIn("v1.2.3 candidate metadata", state)
-        self.assertIn("snapshot taken when the candidate is frozen, not a live status page", state)
-        self.assertIn("gts --reindex --full", upgrading)
-        self.assertIn("search_code", upgrading)
-        self.assertIn("search_gitea", upgrading)
-
-    def test_v200_no_zero_python_fallback_and_neutral_tools_documented(self) -> None:
+    def test_no_zero_python_fallback_and_neutral_tools_documented(self) -> None:
         readme = self.read("README.md")
         boundaries = self.read("docs/BOUNDARIES.md")
         naming = self.read("docs/TOOL-NAMING.md")
@@ -123,57 +87,39 @@ class DocumentationContractTest(unittest.TestCase):
         self.assertIn("--dump-schema", readme)
         self.assertIn("UPGRADING.md", readme)
 
-    def test_documented_python_suite_count_matches_default_chain(self) -> None:
-        package = self.read("package.json")
-        notes = self.read("RELEASE-NOTES.md")
-        changelog = self.read("CHANGELOG.md")
-        command = __import__("json").loads(package)["scripts"]["test:preflight"]
-        suite_count = sum(part.strip().startswith("python3 test/") for part in command.split("&&"))
-        self.assertEqual(suite_count, 12)
-        for document, heading in ((notes, "## v1.2.2 stable"), (changelog, "## [1.2.2] - 2026-11-11")):
-            current, historical = document.split(heading, 1)
-            self.assertIn(f"all {suite_count} Python contract/regression files", current)
-            self.assertIn("all 11 Python contract/regression files", historical)
-            self.assertNotIn("all 12 Python contract/regression files", historical)
-            self.assertNotIn("all ten Python", document)
-        self.assertIn("十二个显式 Python", self.read("MANUAL.md"))
-        self.assertIn("12 套 Python", self.read("CODE-INDEX.md"))
-
-    def test_user_docs_match_quickstart_and_kind_contracts(self) -> None:
+    def test_windows_and_user_boundary_claims_stay_truthful(self) -> None:
+        operations = self.read("docs/OPERATIONS.md")
+        eng_notes = self.read("docs/dev/ENGINEERING-NOTES.md")
         readme = self.read("README.md")
-        manual = self.read("MANUAL.md")
         usage = self.read("docs/USAGE.md")
         post_install = self.read("docs/POST-INSTALL.md")
         contributing = self.read("CONTRIBUTING.md")
+
+        self.assertIn("拒绝 NUL、CR/LF", operations)
+        self.assertIn("拒绝 NUL、CR 与 LF", eng_notes)
+        self.assertNotIn("彻底防御搜索词中恶意注入", operations)
         self.assertIn("不会扫描或导入", readme)
-        self.assertIn("不会递归探测或导入已有本地 Git 仓库", manual)
-        self.assertNotIn("扫描本地任意 Git 项目目录", readme)
-        self.assertNotIn("递归探测目录下的所有 Git 仓库", manual)
+        self.assertIn("不会递归探测或导入已有本地 Git 仓库", operations)
+        self.assertIn("已有不同配置、软链接或非普通文件会被拒绝且保持不动", readme)
         self.assertIn("当前默认分类器把 `*.py` 归入 `code`", usage)
-        self.assertNotIn("`*.service`、`*.py`", usage)
         self.assertIn("做一次真实端到端调用", post_install)
         self.assertIn("安装器有意不自动复制", post_install)
         self.assertIn("npm run test:all", contributing)
         self.assertIn("PyYAML", contributing)
 
-    def test_release_documents_separate_historical_and_live_state(self) -> None:
-        readme = self.read("README.md")
-        state = self.read("PROJECT-STATE.md")
-        windows = self.read("WINDOWS-PORT.md")
-        index = self.read("CODE-INDEX.md")
-        wiki = self.read("WIKI.md")
-        for document in (readme, state):
-            self.assertNotIn("v1.2.3 candidate;", document)
-            self.assertNotIn("当前 `v1.2.3` 是未发布候选", document)
-        self.assertIn("实时验收结果", windows)
-        self.assertNotIn("稳定版 1.2.2 exact-P", windows)
-        self.assertIn("历史 rc7 / hygiene 记录", index)
-        self.assertNotIn("本次 hygiene 修改", index)
-        self.assertIn("不再写删项目根配置", wiki)
-        self.assertIn("GITEA_SEARCH_CONFIG", wiki)
-        self.assertIn("test/quickstart-config-preservation.test.mjs", wiki)
-        self.assertIn("已有不同配置、软链接或非普通文件会被拒绝且保持不动", readme)
-        self.assertNotIn("并在结尾删除项目根", wiki)
+    def test_package_python_suites_match_collect_test_counts_inventory(self) -> None:
+        pkg = json.loads(self.read("package.json"))
+        cmd = pkg["scripts"]["test:python"]
+        pkg_suites = tuple(
+            part.strip().removeprefix("python3 ").strip()
+            for part in cmd.split("&&")
+            if part.strip().startswith("python3 ")
+        )
+        spec = importlib.util.spec_from_file_location("collect_test_counts", ROOT / "scripts/collect-test-counts.py")
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.assertEqual(pkg_suites, tuple(mod.PYTHON_SUITES))
 
 
 if __name__ == "__main__":

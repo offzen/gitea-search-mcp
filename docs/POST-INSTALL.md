@@ -105,4 +105,4 @@ MCP 裸工具名为 `search_code`、`search_docs`、`read_file`、`list_reposito
 - npm 安装不会生成 `gts` CLI；本项目的 npm 依赖只提供 MCP Node SDK。Python wheel/sdist 用 Python 安装器管理 CLI。
 - 配置示例请用 YAML 单引号；Windows 路径优先写正斜杠，例如 `'C:/Users/name/.../gts.exe'`，并确认最终 `GTS_BIN` 字面量路径确实存在。
 
-查看更多：[`MANUAL.md`](../MANUAL.md)、[`docs/USAGE.md`](USAGE.md)、[`docs/TOOL-NAMING.md`](TOOL-NAMING.md)。
+查看更多：[`OPERATIONS.md`](OPERATIONS.md)、[`USAGE.md`](USAGE.md)、[`TOOL-NAMING.md`](TOOL-NAMING.md)。
