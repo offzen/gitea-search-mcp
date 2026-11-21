@@ -27,9 +27,16 @@ function resolveWith(envOverrides, args = {}) {
 }
 
 function cleanEnv(extra = {}) {
+  const defaultHome = extra.HOME || mkdtempSync(path.join(tmpdir(), 'gts-clean-home-'));
   return {
+    HOME: defaultHome,
+    USERPROFILE: extra.USERPROFILE || defaultHome,
     ...extra,
-    __unset: ['GITEA_MIRROR_ROOT', 'GITEA_MIRROR_PATH', 'GITQ_MIRROR_ROOT', 'GITEA_OWNERS', 'GITEA_OWNER', 'GITQ_OWNER', 'GITEA_SEARCH_CONFIG'],
+    __unset: [
+      'GITEA_MIRROR_ROOT', 'GITEA_MIRROR_PATH', 'GITQ_MIRROR_ROOT',
+      'GITEA_OWNERS', 'GITEA_OWNER', 'GITQ_OWNER', 'GITEA_SEARCH_CONFIG',
+      'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'APPDATA', 'LOCALAPPDATA',
+    ],
   };
 }
 
@@ -156,7 +163,7 @@ const SERVER = path.join(ROOT, 'lib', 'server.mjs');
 
 function isolatedEnv(home, extra = {}) {
   const env = { ...process.env, HOME: home, USERPROFILE: home, ...extra };
-  for (const key of ['GITEA_MIRROR_ROOT', 'GITEA_MIRROR_PATH', 'GITQ_MIRROR_ROOT', 'GITEA_OWNERS', 'GITEA_OWNER', 'GITQ_OWNER', 'GITEA_SEARCH_CONFIG', 'XDG_DATA_HOME']) {
+  for (const key of ['GITEA_MIRROR_ROOT', 'GITEA_MIRROR_PATH', 'GITQ_MIRROR_ROOT', 'GITEA_OWNERS', 'GITEA_OWNER', 'GITQ_OWNER', 'GITEA_SEARCH_CONFIG', 'XDG_CONFIG_HOME', 'XDG_DATA_HOME', 'APPDATA', 'LOCALAPPDATA']) {
     if (!(key in extra)) delete env[key];
   }
   return env;
