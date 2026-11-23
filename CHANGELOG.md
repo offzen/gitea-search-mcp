@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.0.2] - 2026-11-24
+
+### Fixed
+- **Multi-frame `.zstd` silent truncation on Node.js 22+ (`lib/zstd.mjs`)**: Node.js 22's built-in `zlib.zstdDecompressSync(buf)` stops silently after Frame #1 on concatenated multi-frame `.zstd` archives (such as append-only DSH session logs). Added an exact RFC 8878 frame boundary scanner (`lib/zstd.mjs`) shared by `scripts/dsh-session-health.mjs` and `scripts/audit-usage.mjs` so Node 22.15+ natively decompresses every frame (including skipping RFC 8878 skippable frames) with zero external CLI dependency, while older Node / `forceCli` paths route through `zstd -dc` and fail closed instead of ever falling back to single-frame truncation.
+- **Multi-frame E2E regression gate**: Upgraded Phase 5 synthetic DSH fixtures in `scripts/run-e2e-test.sh` to 3-frame concatenated `.zstd` archives and asserted all 3 frames survive `dsh-session-health.mjs --fix` intact.
+
+### Added
+- **Opt-in MCP Server JSONL audit telemetry (`lib/audit.mjs` + `lib/server.mjs`)**: Disabled by default (zero disk I/O); enabled via `GITEA_AUDIT_LOG=1|auto|<path>` with privacy-first default redaction (`query_len` + `query_sha8`; raw query logged only when `GITEA_AUDIT_INCLUDE_QUERY=1`). Emits a stable `schema: 1` JSONL contract and never leaks internal `_audit` metadata onto MCP wire results.
+- **Offline usage & net time-savings CLI (`scripts/audit-usage.mjs` / `bin.gts-audit`)**: Aggregates Layer-1 `audit-*.jsonl` logs alongside local host transcripts (T3/Antigravity, DSH v4, Codex), strips lazy MCP schema reads, clusters adjacent calls into Search Episodes (`E1`/`E2`/`E3`), and reports conservative / baseline / optimistic net time savings in text, `--json`, and `--markdown` formats.
+- **Zero-prerequisite newcomer onboarding guide ([`docs/GETTING-STARTED.md`](docs/GETTING-STARTED.md))**: Merged the step-by-step getting-started guide into the repository and `README.md` navigation, and documented the `audit-YYYY-MM.jsonl` (`schema: 1`) contract plus companion read-only MCP Inspector usage in [`docs/OPERATIONS.md`](docs/OPERATIONS.md).
+
 ## [2.0.1]
 
 ### Fixed

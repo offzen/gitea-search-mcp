@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-C21325)](LICENSE)
 [![CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions/workflows/ci.yml)
 [![Windows CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml)
-[![Version](https://img.shields.io/badge/Version-v2.0.1-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v2.0.2-blue)](CHANGELOG.md)
 [![Archive](https://img.shields.io/badge/Archive-v0.1.1%20(Pure%20Node)-orange)](https://github.com/offzen/gitea-search-mcp/tree/legacy-0.1.x)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(Native)-brightgreen)](docs/OPERATIONS.md#1-多场景部署与定时同步)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20.11-success)](package.json)
@@ -92,6 +92,7 @@ bash scripts/quickstart-local.sh /tmp/gitea-search-mcp-demo
 
 | 文档 | 内容 |
 |---|---|
+| **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** | 新用户 3～10 分钟零门槛入门：裸镜像概念、三选一上手路线与各客户端接入 |
 | **[docs/POST-INSTALL.md](docs/POST-INSTALL.md)** | 安装后闭环验收：配置核验、首次同步、MCP 探针与宿主调用确认 |
 | **[docs/USAGE.md](docs/USAGE.md)** | 四工具与 `gts` CLI 参数速查及“先定位、再精读”范例 |
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | Linux / macOS / Windows 部署、定时同步、环境变量全表与排障 |

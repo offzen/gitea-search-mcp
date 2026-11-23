@@ -54,6 +54,7 @@ class DocumentationContractTest(unittest.TestCase):
         for retired in ("RELEASE-NOTES.md", "PROJECT-STATE.md", "MANUAL.md", "WINDOWS-PORT.md", "WIKI.md", "CODE-INDEX.md"):
             self.assertFalse((ROOT / retired).exists(), f"Retired root document must not return: {retired}")
         for expected in (
+            "docs/GETTING-STARTED.md",
             "docs/USAGE.md",
             "docs/POST-INSTALL.md",
             "docs/OPERATIONS.md",

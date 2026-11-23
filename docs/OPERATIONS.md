@@ -211,11 +211,12 @@ npm run test:pack    # 树外验证 npm pack 打包产物完整性与 stdio 探�
 npm run test:hygiene # 公开树敏感凭据/内网坐标与干净工作区扫描
 ```
 
-### 5.4 调用审计埋点与调试分析组件（`gts-audit`）
+### 5.4 调用审计埋点、调试分析组件（`gts-audit`）与伴生可视化调试
 
 默认完全关闭（零磁盘 I/O）。需要审计宿主调用频率、阶段分布与省时收益时，可组合使用双层能力：
 
-1. **服务端 JSONL 审计埋点（可选开启）**：在宿主的 MCP `env` 中设置 `GITEA_AUDIT_LOG=1`（按月写入用户状态目录 `audit-YYYY-MM.jsonl`，或指定显式 `.jsonl` 文件路径）。默认仅记录工具名、耗时、命中数、输出字节、护栏截断标志与脱敏后的 `query_len` / `query_sha8`；仅在显式设 `GITEA_AUDIT_INCLUDE_QUERY=1` 时记录截断原始查询词。
+1. **服务端 JSONL 审计埋点（可选开启，稳定契约 `schema: 1`）**：在宿主的 MCP `env` 中设置 `GITEA_AUDIT_LOG=1`（按月写入用户状态目录 `audit-YYYY-MM.jsonl`，或指定显式 `.jsonl` 文件路径）。默认仅记录工具名、耗时、命中数、输出字节、护栏截断标志与脱敏后的 `query_len` / `query_sha8`；仅在显式设 `GITEA_AUDIT_INCLUDE_QUERY=1` 时记录截断原始查询词。
+   - **公开 JSONL 契约（`schema: 1`）**：每行一条 JSON 记录，固定包含 `schema`、`ts`、`proc_session_id`、`pid`、`ppid`、`client`、`tool`、`raw_tool`、`deprecated_alias`、`args_meta`、`elapsed_ms`、`resp_bytes`、`truncated`、`is_error`，以及可选字段 `client_version`、`internal_ms`、`hits`。任何外部看板、脚本或伴生 UI 均可直接消费该 JSONL 流，无需导入服务端内部模块。
 2. **离线调试分析 CLI（`scripts/audit-usage.mjs` / `gts-audit`）**：同时聚合服务端审计日志与本机宿主会话转录（T3/Antigravity、DSH v4、Codex），自动剥离 lazy MCP schema 读取开销，按「检索意图簇（Search Episode）」聚类去重并输出三档（保守 / 基线 / 乐观）净省时估算：
 
 ```bash
@@ -226,3 +227,15 @@ node scripts/audit-usage.mjs
 node scripts/audit-usage.mjs --dsh-home ~/.dsh --t3-dir ~/.t3/userdata/providers --since 7d --markdown
 node scripts/audit-usage.mjs --audit-log ~/.local/state/gitea-search-mcp --json
 ```
+
+3. **在线可视化检索调试（独立伴生客户端）**：`gitea-search-mcp` 坚持纯 stdio MCP Server 边界，不内置 Web 面板或 HTTP 端口；如需在浏览器中做实时 `tools/call` JSON-RPC 报文调试、耗时观察或与向量栈做多路排名对比，可使用独立的零依赖只读 MCP 客户端伴生工具（如 `dsh-archive-viewer`）通过标准 stdio 挂载本服务：
+
+```bash
+HOST=127.0.0.1 PORT=3082 \
+  MCP_CMD=node \
+  MCP_ARGS_JSON='["/path/to/gitea-search-mcp/bin/mcp-server"]' \
+  MCP_PROFILE=gitea-search \
+  dsh-archive-viewer
+```
+
+> 分工建议：**`gts-audit`** 负责离线历史维度的调用覆盖率、阶段分布与净省时估算；独立 Web Inspector 负责在线交互式的单次召回质量与原始 JSON-RPC 报文调试。
