@@ -160,6 +160,9 @@ pyinstaller --onedir --name gts --hidden-import=indexer --paths=lib bin\gts
 | `GITEA_MAX_SEARCH_BYTES` | `GITQ_MAX_SEARCH_BYTES` | `131072`（128 KiB） | 单次搜索总输出字节预算上限 |
 | `GITEA_MAX_READ_BYTES` | `GITQ_MAX_READ_BYTES` | `60000`（60 KB） | `read_file` 单次读取字节上限 |
 | `GITEA_READ_DEFAULT_LINES` | `GITQ_READ_DEFAULT_LINES` | `400` | `read_file` 默认返回行数 |
+| `GITEA_AUDIT_LOG` | — | 关闭（空 / `0`） | 可选审计埋点：设 `1`/`auto` 写入用户状态目录按月轮转 JSONL，或填显式 `.jsonl` 路径 |
+| `GITEA_AUDIT_INCLUDE_QUERY` | — | `0`（脱敏） | 设为 `1` 时在审计日志中记录截断后的原始 `query`/`path`；默认仅记长度与 SHA-256 前 8 位 |
+| `GITEA_AUDIT_CLIENT` / `GITEA_AUDIT_SESSION_ID` | — | 自动识别 | 可选覆写审计日志中的宿主客户端名称与进程会话关联 ID |
 
 ---
 
@@ -206,4 +209,20 @@ npm run test:e2e     # 31 项合成裸镜像与 MCP 全链路验收
 npm run test:all     # 一键运行上述三层完整测试集
 npm run test:pack    # 树外验证 npm pack 打包产物完整性与 stdio 探针
 npm run test:hygiene # 公开树敏感凭据/内网坐标与干净工作区扫描
+```
+
+### 5.4 调用审计埋点与调试分析组件（`gts-audit`）
+
+默认完全关闭（零磁盘 I/O）。需要审计宿主调用频率、阶段分布与省时收益时，可组合使用双层能力：
+
+1. **服务端 JSONL 审计埋点（可选开启）**：在宿主的 MCP `env` 中设置 `GITEA_AUDIT_LOG=1`（按月写入用户状态目录 `audit-YYYY-MM.jsonl`，或指定显式 `.jsonl` 文件路径）。默认仅记录工具名、耗时、命中数、输出字节、护栏截断标志与脱敏后的 `query_len` / `query_sha8`；仅在显式设 `GITEA_AUDIT_INCLUDE_QUERY=1` 时记录截断原始查询词。
+2. **离线调试分析 CLI（`scripts/audit-usage.mjs` / `gts-audit`）**：同时聚合服务端审计日志与本机宿主会话转录（T3/Antigravity、DSH v4、Codex），自动剥离 lazy MCP schema 读取开销，按「检索意图簇（Search Episode）」聚类去重并输出三档（保守 / 基线 / 乐观）净省时估算：
+
+```bash
+# 自动探测默认状态目录与本机宿主会话目录
+node scripts/audit-usage.mjs
+
+# 显式指定自定义宿主目录并导出 Markdown / JSON 报表
+node scripts/audit-usage.mjs --dsh-home ~/.dsh --t3-dir ~/.t3/userdata/providers --since 7d --markdown
+node scripts/audit-usage.mjs --audit-log ~/.local/state/gitea-search-mcp --json
 ```

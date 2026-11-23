@@ -10,7 +10,8 @@
   },
   "bin": {
     "gitea-search-mcp": "bin/mcp-server",
-    "mcp-server": "bin/mcp-server"
+    "mcp-server": "bin/mcp-server",
+    "gts-audit": "scripts/audit-usage.mjs"
   },
   "files": [
     "bin/gts",
@@ -18,6 +19,7 @@
     "lib/*.mjs",
     "lib/*.py",
     "src/*.js",
+    "scripts/audit-usage.mjs",
     "scripts/doctor-mcp.ps1",
     "scripts/doctor-mcp.sh",
     "scripts/dsh-session-health.mjs",

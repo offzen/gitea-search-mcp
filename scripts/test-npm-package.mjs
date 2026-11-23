@@ -167,6 +167,7 @@ try {
     'bin/mcp-server',
     'bin/gts',
     'src/index.js',
+    'lib/audit.mjs',
     'lib/server.mjs',
     'lib/config.mjs',
     'lib/config.py',
@@ -174,6 +175,7 @@ try {
     'lib/mirror-state.mjs',
     'lib/mirror_state.py',
     'lib/next-actions.mjs',
+    'scripts/audit-usage.mjs',
     'scripts/sync.sh',
     'scripts/probe-stdio.mjs',
     'scripts/doctor-mcp.sh',
@@ -216,12 +218,14 @@ try {
   assert.equal(fs.existsSync(rootNodeModules), true, 'Run npm ci before test-npm-package.mjs');
   fs.symlinkSync(rootNodeModules, path.join(pkgRoot, 'node_modules'), IS_WIN ? 'junction' : 'dir');
 
-  // 3. Static schema export from unpacked tarball in a neutral working directory
+  // 3. Static schema export and audit CLI help from unpacked tarball in a neutral working directory
   const dump = run(process.execPath, [path.join(pkgRoot, 'bin', 'mcp-server'), '--dump-schema'], { cwd: neutralCwd });
   const schema = JSON.parse(dump.stdout);
   assert.equal(schema.service, 'gitea-search-mcp');
   assert.equal(schema.version, pkg.version);
   assert.equal(schema.functions?.length, 4);
+  const auditHelp = run(process.execPath, [path.join(pkgRoot, 'scripts', 'audit-usage.mjs'), '--help'], { cwd: neutralCwd });
+  assert.match(auditHelp.stdout, /Usage: gts-audit/);
 
   // 4. End-to-end stdio handshake & search against an isolated bare mirror
   const work = path.join(scratch, 'work');
