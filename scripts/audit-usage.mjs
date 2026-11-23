@@ -12,13 +12,12 @@
  *      non-MCP fallback workflows (conservative / baseline / optimistic), explicitly
  *      deducting zero-hit retries, lazy schema overhead, and `sync: true` blocking time.
  */
-import { execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import zlib from 'node:zlib';
 import { defaultStateDir } from '../lib/audit.mjs';
+import { decompressZstd as decompressZstdRaw } from '../lib/zstd.mjs';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -71,21 +70,11 @@ function expandHome(p) {
   return p;
 }
 
-const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
-
-function decompressZstd(buf) {
-  const isMultiFrame = buf.length > 4 && buf.indexOf(ZSTD_MAGIC, 4) !== -1;
-  if (!isMultiFrame && typeof zlib.zstdDecompressSync === 'function' && process.env.GITEA_AUDIT_FORCE_ZSTD_CLI !== '1') {
-    return zlib.zstdDecompressSync(buf);
-  }
-  try {
-    return execFileSync('zstd', ['-dc'], { input: buf, maxBuffer: 256 * 1024 * 1024 });
-  } catch (err) {
-    if (typeof zlib.zstdDecompressSync === 'function') {
-      return zlib.zstdDecompressSync(buf);
-    }
-    throw err;
-  }
+function decompressZstd(buf, opts = {}) {
+  return decompressZstdRaw(buf, {
+    forceCli: opts.forceCli ?? (process.env.GITEA_AUDIT_FORCE_ZSTD_CLI === '1'),
+    zstdBin: opts.zstdBin,
+  });
 }
 
 function unwrapJsonValue(val) {
@@ -454,14 +443,17 @@ function parseT3Transcript(filePath, sinceMs = null) {
 }
 
 /** Parse a single DSH v4 (.zstd or .jsonl) session file. */
-function parseDshSession(filePath, sinceMs = null) {
+function parseDshSession(filePath, sinceMs = null, opts = {}) {
   let text;
   try {
     const rawBuf = fs.readFileSync(filePath);
     text = filePath.endsWith('.zstd') || filePath.endsWith('.zst')
-      ? decompressZstd(rawBuf).toString('utf8')
+      ? decompressZstd(rawBuf, opts).toString('utf8')
       : rawBuf.toString('utf8');
-  } catch {
+  } catch (err) {
+    if (typeof opts.onWarning === 'function') {
+      opts.onWarning(`Skipped unreadable DSH session (${path.basename(filePath)}): ${err?.message || err}`);
+    }
     return null;
   }
 
@@ -1008,10 +1000,20 @@ function runAudit(opts = {}) {
         4,
       );
     });
-    const sessions = files.map((f) => parseDshSession(f, sinceMs)).filter(Boolean);
-    if (sessions.length || opts.dshHomes?.length) {
+    const dshWarnings = [];
+    const sessions = files
+      .map((f) => parseDshSession(f, sinceMs, {
+        forceCli: opts.forceZstdCli,
+        zstdBin: opts.zstdBin,
+        onWarning: (msg) => {
+          if (dshWarnings.length < 10) dshWarnings.push(msg);
+        },
+      }))
+      .filter(Boolean);
+    if (sessions.length || dshWarnings.length || opts.dshHomes?.length) {
       sources.dsh = {
         files_scanned: files.length,
+        ...(dshWarnings.length ? { unreadable_files: dshWarnings.length, warnings: dshWarnings } : {}),
         ...analyzeSessions(sessions, opts),
       };
       combinedHostSessions.push(...sessions);
@@ -1218,6 +1220,11 @@ if (isDirectRun()) {
       process.exit(0);
     }
     const report = runAudit(opts);
+    for (const src of Object.values(report.sources || {})) {
+      if (Array.isArray(src.warnings) && src.warnings.length > 0) {
+        process.stderr.write(`gts-audit warning: ${src.warnings[0]}${src.warnings.length > 1 ? ` (+${src.warnings.length - 1} more)` : ''}\n`);
+      }
+    }
     if (opts.format === 'json') {
       process.stdout.write(JSON.stringify(report, null, 2) + '\n');
     } else if (opts.format === 'markdown') {
@@ -1235,6 +1242,7 @@ export {
   TIER_PARAMS,
   analyzeSessions,
   clusterEpisodes,
+  decompressZstd,
   estimateSavings,
   formatMarkdownReport,
   formatTextReport,

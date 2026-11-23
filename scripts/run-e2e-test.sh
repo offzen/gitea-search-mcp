@@ -378,10 +378,11 @@ sdir = os.path.join(home, 'sessions', '--mock-proj--', 'session-00000000-0000-40
 sid = '00000000-0000-4000-8000-000000000001'
 lines = [
     json.dumps({"version": 1, "id": sid, "createdAt": "2026-10-01T00:00:00.000Z", "cwd": "/tmp", "isSeeded": False, "delegationDepth": 0}),
-    json.dumps({"type": "user/message", "seq": 0, "time": "2026-10-01T00:00:01.000Z", "data": {"role": "user", "content": "hello v1", "source": {"kind": "user"}}}),
+    json.dumps({"type": "user/message", "seq": 0, "time": "2026-10-01T00:00:01.000Z", "data": {"role": "user", "content": "hello v1 frame 2", "source": {"kind": "user"}}}),
+    json.dumps({"type": "assistant/message", "seq": 1, "time": "2026-10-01T00:00:02.000Z", "data": {"message": {"role": "assistant", "content": [{"type": "text", "text": "reply v1 frame 3"}]}}}),
 ]
-payload = ("\n".join(lines) + "\n").encode("utf-8")
-zstd_bytes = subprocess.check_output(["zstd", "-c"], input=payload)
+# 故意按追加式多帧拼接压缩（每行一个独立 zstd 帧），回归守卫 Node 22 zlib 单帧静默截断缺陷
+zstd_bytes = b"".join(subprocess.check_output(["zstd", "-c"], input=(ln + "\n").encode("utf-8")) for ln in lines)
 with open(os.path.join(sdir, "session.jsonl.zstd"), "wb") as f:
     f.write(zstd_bytes)
 
@@ -398,7 +399,7 @@ if [ ! -f "$HEALTH_SCRIPT" ]; then
 fi
 assert_ok "dsh-session-health.mjs --check 检出旧版 v1 会话与长 revision (WARN)" "node \"$HEALTH_SCRIPT\" --check --dsh-home \"$MOCK_DSH\" --json | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d[\"status\"]==\"WARN\" and d[\"sessions\"][\"legacy_remaining\"]==1 and d[\"sqlite\"][\"long_revisions\"]==1'"
 
-assert_ok "dsh-session-health.mjs --fix 无损迁移 v1->v4、保留原文件并对齐 SQLite revision (OK)" "node \"$HEALTH_SCRIPT\" --fix --dsh-home \"$MOCK_DSH\" --json | python3 -c 'import sys,json,os; d=json.load(sys.stdin); sdir=sys.argv[1]; assert d[\"status\"]==\"OK\" and d[\"sessions\"][\"migrated\"]==1 and d[\"sessions\"][\"legacy_remaining\"]==0 and d[\"sqlite\"][\"long_revisions\"]==0 and os.path.exists(sdir+\"/session.v4.jsonl.zstd\") and os.path.exists(sdir+\"/session.jsonl.zstd\")' \"$MOCK_DSH/sessions/--mock-proj--/session-00000000-0000-4000-8000-000000000001\""
+assert_ok "dsh-session-health.mjs --fix 无损迁移多帧 v1->v4、保留全帧与原文件并对齐 SQLite revision (OK)" "node \"$HEALTH_SCRIPT\" --fix --dsh-home \"$MOCK_DSH\" --json | python3 -c 'import sys,json,os,subprocess; d=json.load(sys.stdin); sdir=sys.argv[1]; v4=sdir+\"/session.v4.jsonl.zstd\"; assert d[\"status\"]==\"OK\" and d[\"sessions\"][\"migrated\"]==1 and d[\"sessions\"][\"legacy_remaining\"]==0 and d[\"sqlite\"][\"long_revisions\"]==0 and os.path.exists(v4) and os.path.exists(sdir+\"/session.jsonl.zstd\"); rows=[json.loads(l) for l in subprocess.check_output([\"zstd\",\"-dc\",v4], text=True).strip().splitlines()]; assert len(rows)==3 and rows[0][\"version\"]==4 and \"frame 3\" in rows[2][\"data\"][\"message\"][\"content\"][0][\"text\"], rows' \"$MOCK_DSH/sessions/--mock-proj--/session-00000000-0000-4000-8000-000000000001\""
 
 assert_ok "gts --doctor --dsh-home 综合诊断返回 Overall OK" "\"$GTS_BIN\" --doctor --dsh-home \"$MOCK_DSH\" --json | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d[\"overall_status\"]==\"OK\" and d[\"fts_index\"][\"aligned_1to1\"] is True and d[\"dsh_sessions\"][\"status\"]==\"OK\"'"
 
@@ -486,11 +487,11 @@ sdir = os.path.join(home, 'sessions', '--mock-proj--', 'session-00000000-0000-40
 sid = '00000000-0000-4000-8000-000000000002'
 lines = [
     json.dumps({"version": 1, "id": sid, "createdAt": "2026-10-01T00:00:00.000Z", "cwd": "/tmp"}),
-    json.dumps({"type": "user/message", "seq": 0, "time": "2026-10-01T00:00:01.000Z", "data": {"role": "user", "content": "fallback v1", "source": {"kind": "plugin", "plugin": "compact"}}}),
+    json.dumps({"type": "user/message", "seq": 0, "time": "2026-10-01T00:00:01.000Z", "data": {"role": "user", "content": "fallback v1 frame 2", "source": {"kind": "plugin", "plugin": "compact"}}}),
+    json.dumps({"type": "assistant/message", "seq": 1, "time": "2026-10-01T00:00:02.000Z", "data": {"message": {"role": "assistant", "content": [{"type": "text", "text": "fallback v1 frame 3"}]}}}),
 ]
-payload = ("\n".join(lines) + "\n").encode("utf-8")
 with open(os.path.join(sdir, "session.jsonl.zstd"), "wb") as f:
-    f.write(subprocess.check_output(["zstd", "-c"], input=payload))
+    f.write(b"".join(subprocess.check_output(["zstd", "-c"], input=(ln + "\n").encode("utf-8")) for ln in lines))
 conn = sqlite3.connect(os.path.join(home, "session-query.sqlite"))
 conn.execute("CREATE TABLE persisted_sessions (id TEXT PRIMARY KEY, revision TEXT NOT NULL)")
 conn.execute("INSERT INTO persisted_sessions (id, revision) VALUES (?, ?)", (sid, "1:2:3:4:5:" + "b" * 64))
@@ -498,7 +499,7 @@ conn.commit()
 conn.close()
 PYEOF
 assert_ok "Node <22.15 兼容模式回退验证 (DSH_FORCE_ZSTD_CLI=1 DSH_FORCE_SQLITE_CLI=1)" \
-  "DSH_FORCE_ZSTD_CLI=1 DSH_FORCE_SQLITE_CLI=1 DSH_PERSISTENCE_MODULE=/nonexistent node \"$HEALTH_SCRIPT\" --fix --dsh-home \"$MOCK_DSH_FALLBACK\" --json | python3 -c 'import sys,json; d=json.load(sys.stdin); assert d[\"status\"]==\"OK\" and d[\"sessions\"][\"migrated\"]==1 and d[\"sqlite\"].get(\"error\") is None, d[\"sqlite\"].get(\"error\"); assert d[\"sqlite\"].get(\"engine\")==\"sqlite3-cli\" and d[\"sqlite\"][\"long_revisions\"]==0'"
+  "DSH_FORCE_ZSTD_CLI=1 DSH_FORCE_SQLITE_CLI=1 DSH_PERSISTENCE_MODULE=/nonexistent node \"$HEALTH_SCRIPT\" --fix --dsh-home \"$MOCK_DSH_FALLBACK\" --json | python3 -c 'import sys,json,subprocess; d=json.load(sys.stdin); v4=sys.argv[1]+\"/session.v4.jsonl.zstd\"; assert d[\"status\"]==\"OK\" and d[\"sessions\"][\"migrated\"]==1 and d[\"sqlite\"].get(\"error\") is None, d[\"sqlite\"].get(\"error\"); assert d[\"sqlite\"].get(\"engine\")==\"sqlite3-cli\" and d[\"sqlite\"][\"long_revisions\"]==0; rows=[json.loads(l) for l in subprocess.check_output([\"zstd\",\"-dc\",v4], text=True).strip().splitlines()]; assert len(rows)==3 and rows[1][\"data\"][\"source\"][\"kind\"]==\"compact-checkpoint\", rows' \"$MOCK_DSH_FALLBACK/sessions/--mock-proj--/session-00000000-0000-4000-8000-000000000002\""
 
 # 回归验证：当 GITEA_MIRROR_ROOT / GITEA_OWNERS 为未初始化占位符（0 镜像仓）时，server.mjs 显式输出空镜像告警而非静默 0 命中
 mkdir -p "$MIRROR_ROOT/empty-placeholder/test-owner"

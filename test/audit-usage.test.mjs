@@ -15,20 +15,32 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import zlib from 'node:zlib';
 import {
+  compressZstd as libCompressZstd,
+  decompressZstd as libDecompressZstd,
+  isMultiFrameZstd,
+  splitZstdFrames,
+} from '../lib/zstd.mjs';
+import {
   clusterEpisodes,
   estimateSavings,
   normalizeToolName,
+  parseDshSession,
   runAudit,
 } from '../scripts/audit-usage.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const AUDIT_CLI = path.join(ROOT, 'scripts', 'audit-usage.mjs');
 
+function hasZstdSupport() {
+  if (typeof zlib.zstdCompressSync === 'function') return true;
+  const r = spawnSync('zstd', ['--version'], { stdio: 'ignore' });
+  return r.status === 0;
+}
+
+const HAS_ZSTD = hasZstdSupport();
+
 function compressZstd(buf) {
-  if (typeof zlib.zstdCompressSync === 'function') {
-    return zlib.zstdCompressSync(buf);
-  }
-  return execFileSync('zstd', ['-c'], { input: buf });
+  return libCompressZstd(buf);
 }
 
 test('normalizeToolName maps v2 bare names, v1/legacy aliases, and host prefixes consistently', () => {
@@ -144,10 +156,18 @@ test('runAudit parses all 4 sources (audit JSONL, T3, DSH .zstd, Codex) and form
     JSON.stringify({ type: 'tool/call', time: 1795400005000, data: { callId: 'c3', name: 'bash', arguments: '{"cmd":"echo ok"}' } }),
     JSON.stringify({ type: 'tool/result', time: 1795400005100, data: { message: { toolCallId: 'c3', content: [{ type: 'text', text: 'ok' }] } } }),
   ].join('\n') + '\n';
-  fs.writeFileSync(
-    path.join(dshSessDir, 'session.v4.jsonl.zstd'),
-    Buffer.concat([compressZstd(Buffer.from(dshFrame1, 'utf8')), compressZstd(Buffer.from(dshFrame2, 'utf8'))]),
-  );
+  if (HAS_ZSTD) {
+    fs.writeFileSync(
+      path.join(dshSessDir, 'session.v4.jsonl.zstd'),
+      Buffer.concat([compressZstd(Buffer.from(dshFrame1, 'utf8')), compressZstd(Buffer.from(dshFrame2, 'utf8'))]),
+    );
+  } else {
+    fs.writeFileSync(
+      path.join(dshSessDir, 'session.v4.jsonl'),
+      dshFrame1 + dshFrame2,
+      'utf8',
+    );
+  }
 
   // 4. Codex rollout JSONL
   const codexHome = path.join(dir, 'codex');
@@ -216,7 +236,65 @@ test('runAudit parses all 4 sources (audit JSONL, T3, DSH .zstd, Codex) and form
   assert.match(cliMd.stdout, /\| `dsh` \| 1\/1 \|/);
 });
 
+test('lib/zstd.mjs splits and decompresses multi-frame (+ skippable) payloads natively and fails closed without CLI', (t) => {
+  if (!HAS_ZSTD) {
+    t.skip('Neither Node zlib.zstdCompressSync nor zstd CLI is available in this environment');
+    return;
+  }
+
+  const p1 = Buffer.from('{"frame":1,"role":"session"}\n', 'utf8');
+  const p2 = Buffer.from('{"frame":2,"role":"user","text":"hello"}\n', 'utf8');
+  const p3 = Buffer.from('{"frame":3,"role":"assistant","text":"world"}\n', 'utf8');
+  // RFC 8878 skippable frame: magic 0x184D2A50 + 4-byte LE length (4) + 4 arbitrary bytes
+  const skippable = Buffer.alloc(12);
+  skippable.writeUInt32LE(0x184d2a50, 0);
+  skippable.writeUInt32LE(4, 4);
+  skippable.write('SKIP', 8, 'ascii');
+
+  const combined = Buffer.concat([
+    compressZstd(p1),
+    skippable,
+    compressZstd(p2),
+    compressZstd(p3),
+  ]);
+
+  const frames = splitZstdFrames(combined);
+  assert.equal(frames.length, 3, 'Skippable frame must be skipped and all 3 data frames returned');
+  assert.equal(isMultiFrameZstd(combined), true);
+
+  // Decompress with nonexistent zstdBin to prove Node 22+ handles multi-frame natively without CLI
+  if (typeof zlib.zstdDecompressSync === 'function') {
+    const out = libDecompressZstd(combined, { zstdBin: '/nonexistent/zstd-cli' }).toString('utf8');
+    assert.equal(out, p1.toString('utf8') + p2.toString('utf8') + p3.toString('utf8'));
+  }
+
+  // Force CLI with nonexistent binary must fail closed (never silently return frame 1 only)
+  assert.throws(
+    () => libDecompressZstd(combined, { forceCli: true, zstdBin: '/nonexistent/zstd-cli' }),
+    /fail-closed|Failed to decompress/i,
+  );
+
+  // parseDshSession must surface a warning and return null rather than truncated frame-1 session
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-zstd-failclosed-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const zstdPath = path.join(dir, 'session.v4.jsonl.zstd');
+  fs.writeFileSync(zstdPath, combined);
+  const warnings = [];
+  const res = parseDshSession(zstdPath, null, {
+    forceCli: true,
+    zstdBin: '/nonexistent/zstd-cli',
+    onWarning: (w) => warnings.push(w),
+  });
+  assert.equal(res, null);
+  assert.equal(warnings.length, 1);
+  assert.match(warnings[0], /Skipped unreadable DSH session/);
+});
+
 test('dsh-session-health.mjs --fix preserves all frames when migrating multi-frame legacy .zstd', (t) => {
+  if (!HAS_ZSTD) {
+    t.skip('Neither Node zlib.zstdCompressSync nor zstd CLI is available in this environment');
+    return;
+  }
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-dsh-multiframe-'));
   t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
 
@@ -247,7 +325,7 @@ test('dsh-session-health.mjs --fix preserves all frames when migrating multi-fra
 
   const v4Path = path.join(sessDir, 'session.v4.jsonl.zstd');
   assert.equal(fs.existsSync(v4Path), true, 'session.v4.jsonl.zstd must be written');
-  const decompressed = execFileSync('zstd', ['-dc', v4Path], { encoding: 'utf8' });
+  const decompressed = libDecompressZstd(fs.readFileSync(v4Path)).toString('utf8');
   const outLines = decompressed.trim().split('\n').map((l) => JSON.parse(l));
   assert.equal(outLines.length, 3, `Expected all 3 frames preserved, got ${outLines.length}`);
   assert.equal(outLines[0].version, 4);
