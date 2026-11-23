@@ -29,8 +29,14 @@ import { performance } from 'node:perf_hooks';
 import { pathToFileURL } from 'node:url';
 import zlib from 'node:zlib';
 
+const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
+
 function decompressZstd(buf) {
-  if (typeof zlib.zstdDecompressSync === 'function' && process.env.DSH_FORCE_ZSTD_CLI !== '1') {
+  // Node.js 22's built-in zlib.zstdDecompressSync silently stops after Frame #1 on
+  // concatenated multi-frame .zstd files (such as append-only DSH session logs).
+  // Fast-path single-frame buffers to Node zlib; always route multi-frame buffers via `zstd -dc`.
+  const isMultiFrame = buf.length > 4 && buf.indexOf(ZSTD_MAGIC, 4) !== -1;
+  if (!isMultiFrame && typeof zlib.zstdDecompressSync === 'function' && process.env.DSH_FORCE_ZSTD_CLI !== '1') {
     return zlib.zstdDecompressSync(buf);
   }
   return execFileSync('zstd', ['-dc'], { input: buf, maxBuffer: 256 * 1024 * 1024 });

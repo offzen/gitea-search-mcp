@@ -215,3 +215,42 @@ test('runAudit parses all 4 sources (audit JSONL, T3, DSH .zstd, Codex) and form
   assert.equal(cliMd.status, 0, cliMd.stderr);
   assert.match(cliMd.stdout, /\| `dsh` \| 1\/1 \|/);
 });
+
+test('dsh-session-health.mjs --fix preserves all frames when migrating multi-frame legacy .zstd', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-dsh-multiframe-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  const dshHome = path.join(dir, '.dsh');
+  const sessDir = path.join(dshHome, 'sessions', 'ws-test', 'sess-mf-001');
+  fs.mkdirSync(sessDir, { recursive: true });
+
+  const frame1 = JSON.stringify({ type: 'session', version: 1, id: 'sess-mf-001', createdAt: 1795400000000 }) + '\n';
+  const frame2 = JSON.stringify({ type: 'user/message', seq: 1, data: { source: { kind: 'plugin', plugin: 'compact' }, text: 'hello frame 2' } }) + '\n';
+  const frame3 = JSON.stringify({ type: 'assistant/message', seq: 2, data: { message: { role: 'assistant', content: [{ type: 'text', text: 'reply frame 3' }] } } }) + '\n';
+  const multiFrame = Buffer.concat([
+    compressZstd(Buffer.from(frame1, 'utf8')),
+    compressZstd(Buffer.from(frame2, 'utf8')),
+    compressZstd(Buffer.from(frame3, 'utf8')),
+  ]);
+  fs.writeFileSync(path.join(sessDir, 'session.jsonl.zstd'), multiFrame);
+
+  const env = { ...process.env, HOME: dir, USERPROFILE: dir };
+  delete env.DSH_PERSISTENCE_MODULE;
+  delete env.DSH_FORCE_ZSTD_CLI;
+
+  const res = spawnSync(
+    process.execPath,
+    [path.join(ROOT, 'scripts', 'dsh-session-health.mjs'), '--fix', '--dsh-home', dshHome, '--json'],
+    { encoding: 'utf8', env },
+  );
+  assert.equal(res.status, 0, `dsh-session-health --fix failed:\n${res.stderr}\n${res.stdout}`);
+
+  const v4Path = path.join(sessDir, 'session.v4.jsonl.zstd');
+  assert.equal(fs.existsSync(v4Path), true, 'session.v4.jsonl.zstd must be written');
+  const decompressed = execFileSync('zstd', ['-dc', v4Path], { encoding: 'utf8' });
+  const outLines = decompressed.trim().split('\n').map((l) => JSON.parse(l));
+  assert.equal(outLines.length, 3, `Expected all 3 frames preserved, got ${outLines.length}`);
+  assert.equal(outLines[0].version, 4);
+  assert.equal(outLines[1].data.source.kind, 'compact-checkpoint');
+  assert.equal(outLines[2].data.message.content[0].text, 'reply frame 3');
+});
