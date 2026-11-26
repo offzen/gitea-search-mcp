@@ -8,7 +8,7 @@
 
 - effective config 指向真实 owner 与预期镜像根；
 - 镜像至少包含一个仓库，FTS 索引存在、`PRAGMA user_version = 2` 且与镜像对齐；
-- 独立 MCP stdio 探针通过并列出四个中性裸工具名；
+- 独立 MCP stdio 探针通过并列出五个中性裸工具名；
 - 选定的宿主配置/profile 已重载，实际工具表中能找到对应注册名；
 - 在宿主会话里调用 `list_repositories` 和一次搜索得到预期结果。
 
@@ -72,7 +72,7 @@ powershell -ExecutionPolicy Bypass -File scripts\doctor-mcp.ps1 -Verify
 
 探针会对**独立启动的 server 进程**执行 MCP initialize、tools/list、一次 `search_code` 调用及一次旧别名转发验证，并只读核验本地 SQLite 索引的 `PRAGMA user_version`（若为旧版 `0/1` 会提示执行 `gts --reindex --full`）。它不能证明宿主已加载配置或宿主侧注册名是什么。
 
-MCP 裸工具名为 `search_code`、`search_docs`、`read_file`、`list_repositories`（`tools/call` 同时兼容 `search_gitea*` 与 `search_gitorca*` 旧别名）。宿主可能添加前缀或改名；配置重载后请在实际工具表核对。示例 `mcp__gitea-search__search_code` 仅为命名示意，不保证每个宿主都使用该格式。
+MCP 裸工具名为 `search_code`、`search_docs`、`read_file`、`list_repositories`、`sync_mirror`（`tools/call` 同时兼容 `search_gitea*` 与 `search_gitorca*` 旧别名）。宿主可能添加前缀或改名；配置重载后请在实际工具表核对。示例 `mcp__gitea-search__search_code` 仅为命名示意，不保证每个宿主都使用该格式。
 
 ## 4. 让宿主配置生效
 
@@ -106,3 +106,12 @@ MCP 裸工具名为 `search_code`、`search_docs`、`read_file`、`list_reposito
 - 配置示例请用 YAML 单引号；Windows 路径优先写正斜杠，例如 `'C:/Users/name/.../gts.exe'`，并确认最终 `GITEA_SEARCH_CLI`（兼容 `GTS_BIN`）字面量路径确实存在。
 
 查看更多：[`OPERATIONS.md`](OPERATIONS.md)、[`USAGE.md`](USAGE.md)、[`TOOL-NAMING.md`](TOOL-NAMING.md)。
+
+## 常见返回与处置（v2.0.3）
+
+- `sync.sh` 退出 `75` / 结果里出现 `SYNC_BUSY`：另一轮同步正在进行，属正常让路，稍后重试即可。
+- `sync_mirror` 返回 `SYNC_DEGRADED`：已知仓已同步成功，但本轮枚举回退到了缓存或本地目录；确认宿主 MCP `env` 已提供 `GITEA_URL`（及 Token / SSH 配置）后再试。
+- `search_code` 返回 `SYNC_MOVED`：旧调用方仍传了已移除的 `sync: true`，`search_code` 保持只读未执行同步，改调 `sync_mirror` 即可。
+- 同步日志之外，索引更新的输出在 `<镜像根>/state/index-last.log`；`INDEX_UPDATE_FAILED` 时先看它的末尾。
+- 空仓库（尚无任何提交）不会出现在检索结果中，也不会导致同步或索引失败；首次提交后下一轮自动纳入。
+- 其余错误码（`FILE_TOO_LARGE`、`OUTPUT_TOO_LARGE`、`PARTIAL_RESULT`、`INVALID_REF`）见 [`USAGE.md`](USAGE.md) §2.6。

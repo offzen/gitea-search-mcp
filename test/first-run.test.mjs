@@ -27,11 +27,16 @@ function syncCli(dir, env, args, syncExit = 0, syncStderr = '') {
   const code = `
 import json, pathlib, runpy, subprocess, sys
 from unittest.mock import patch
-def sync(command, **kwargs):
-    pathlib.Path(${JSON.stringify(capture)}).write_text(json.dumps({'command': command, 'env': kwargs.get('env')}), encoding='utf-8')
-    return subprocess.CompletedProcess(command, ${syncExit}, stdout='', stderr=${JSON.stringify(syncStderr)})
+class FakeSyncPopen:
+    # 2.0.3：gts 用 Popen（独立进程组 + 超时整组终止）运行 sync.sh，测试桩随之从 subprocess.run 换成 Popen。
+    def __init__(self, command, **kwargs):
+        pathlib.Path(${JSON.stringify(capture)}).write_text(json.dumps({'command': command, 'env': kwargs.get('env')}), encoding='utf-8')
+        self.returncode = ${syncExit}
+        self.pid = 0
+    def communicate(self, timeout=None):
+        return '', ${JSON.stringify(syncStderr)}
 sys.argv = [${JSON.stringify(path.join(ROOT, 'bin', 'gts'))}, *json.loads(${JSON.stringify(JSON.stringify(args))})]
-with patch('subprocess.run', side_effect=sync):
+with patch('subprocess.Popen', FakeSyncPopen):
     runpy.run_path(sys.argv[0], run_name='__main__')
 `;
   const result = spawnSync(PY, ['-c', code], { encoding: 'utf8', env, timeout: 15000 });

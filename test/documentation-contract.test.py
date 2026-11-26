@@ -125,7 +125,7 @@ class DocumentationContractTest(unittest.TestCase):
         for doc in (readme, boundaries, naming):
             for token in forbidden:
                 self.assertNotIn(token, doc)
-            for tool in ("search_code", "search_docs", "read_file", "list_repositories"):
+            for tool in ("search_code", "search_docs", "read_file", "list_repositories", "sync_mirror"):
                 self.assertIn(tool, doc)
         self.assertIn("--dump-schema", readme)
         self.assertIn("UPGRADING.md", readme)

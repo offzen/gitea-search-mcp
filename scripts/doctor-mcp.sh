@@ -21,7 +21,7 @@ GTS="${GITEA_SEARCH_CLI:-${GTS_BIN:-$(command -v gts || true)}}"
 if [[ -z "$GTS" ]]; then GTS="$ROOT_DIR/bin/gts"; fi
 export GITEA_SEARCH_CLI="$GTS"
 export GTS_BIN="$GTS"
-printf 'MCP bare tool names:\n  search_code\n  search_docs\n  read_file\n  list_repositories\n'
+printf 'MCP bare tool names:\n  search_code\n  search_docs\n  read_file\n  list_repositories\n  sync_mirror\n'
 printf 'Legacy tool aliases accepted on tools/call: search_gitea*, search_gitorca*\n'
 printf 'Host naming examples (not guaranteed): mcp__gitea-search__search_code\n'
 printf 'Checking standalone server; this does not verify host registration.\n'

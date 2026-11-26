@@ -31,14 +31,20 @@ test('Linux gate strips ambient config aliases and enforces four-cell packaging 
   assert.match(gate, /check-public-hygiene\.py/);
 });
 
-test('GitHub workflows run Linux, macOS, and Windows gates without duplicate receipt jobs and attest releases', () => {
+test('GitHub workflows run Linux, macOS, and Windows gates via reusable workflow_call and attest releases', () => {
   assert.doesNotMatch(githubCi, /hosted-linux-receipt|hosted-macos-receipt|write-gate-receipt/);
   assert.doesNotMatch(windowsCi, /hosted-windows-receipt|write-gate-receipt/);
+  assert.match(githubCi, /workflow_call:/);
   assert.match(githubCi, /collect-test-counts\.py/);
   assert.match(githubCi, /test-npm-package\.mjs/);
   assert.match(githubCi, /check-public-hygiene\.py/);
-  for (const job of ['windows-pe:', 'windows-ps:', 'windows-tests:', 'windows-git-bash:', 'windows-grep-crlf:']) {
+  assert.match(githubCi, /test-macos:/);
+  assert.match(windowsCi, /workflow_call:/);
+  for (const job of ['windows-pe:', 'windows-ps:', 'windows-tests:', 'windows-git-bash:']) {
     assert.match(windowsCi, new RegExp(job));
   }
+  assert.match(windowsCi, /W9.*CRLF/);
+  assert.match(releaseCi, /uses:\s*\.\/\.github\/workflows\/ci\.yml/);
+  assert.match(releaseCi, /uses:\s*\.\/\.github\/workflows\/windows-ci\.yml/);
   assert.match(releaseCi, /actions\/attest-build-provenance@v2/);
 });

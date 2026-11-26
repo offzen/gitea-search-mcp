@@ -1,7 +1,7 @@
 {
   "name": "gitea-search-mcp",
   "type": "module",
-  "version": "2.0.2",
+  "version": "2.0.3",
   "description": "通用 Gitea / Forgejo / 本地 Git 裸镜像混合检索 MCP Server（git grep + SQLite FTS5 + Jieba）",
   "license": "Apache-2.0",
   "main": "lib/server.mjs",
@@ -63,7 +63,7 @@
   ],
   "scripts": {
     "test": "node --test",
-    "test:python": "python3 test/collect-test-counts.test.py && python3 test/dependency-missing.test.py && python3 test/owner-qualified-repos.test.py && python3 test/fts-result-contract.test.py && python3 test/profile-yaml.test.py && python3 test/repo-zero-hit.test.py && python3 test/documentation-contract.test.py",
+    "test:python": "python3 test/collect-test-counts.test.py && python3 test/dependency-missing.test.py && python3 test/owner-qualified-repos.test.py && python3 test/fts-result-contract.test.py && python3 test/profile-yaml.test.py && python3 test/repo-zero-hit.test.py && python3 test/indexer-resilience.test.py && python3 test/documentation-contract.test.py",
     "test:preflight": "npm run test:python",
     "test:e2e": "bash scripts/run-e2e-test.sh",
     "test:pack": "node scripts/test-npm-package.mjs",

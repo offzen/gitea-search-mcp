@@ -20,7 +20,7 @@
  *   --json         : 输出结构化 JSON
  */
 
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import fsp from 'node:fs/promises';
 import os from 'node:os';
@@ -205,6 +205,30 @@ function builtinFallbackMigrateToV4(item) {
   return true;
 }
 
+// 2.0.3：--fix 只改写「当前没有进程持有 session.lock」的会话（与 session-export-incremental.py 的 is_active 同一判据）。
+// Node 没有 flock，借 python3（本项目硬依赖）做非阻塞探测；探测不了（无 python / Windows）一律按活跃处理——宁可跳过也不改写正在写入的会话。
+const LOCK_PROBE = [
+  'import fcntl, os, sys',
+  'try:',
+  '    fd = os.open(sys.argv[1], os.O_RDONLY)',
+  'except OSError:',
+  '    sys.exit(0)',
+  'try:',
+  '    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)',
+  'except OSError:',
+  '    sys.exit(10)',
+  'sys.exit(0)',
+].join('\n');
+
+function isSessionActive(sessionDir) {
+  const lock = path.join(sessionDir, 'session.lock');
+  if (!fs.existsSync(lock)) return false;
+  if (process.platform === 'win32') return true;
+  const r = spawnSync(process.env.DSH_LOCK_PROBE_PYTHON || 'python3', ['-c', LOCK_PROBE, lock], { timeout: 5000 });
+  if (r.error || r.status === null) return true;
+  return r.status !== 0;
+}
+
 function fileRevisionString(filePath) {
   const st = fs.statSync(filePath, { bigint: true });
   return `${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`;
@@ -223,12 +247,22 @@ async function inspectAndOptionallyFix(dshHome, doFix) {
   let revisionsAligned = 0;
   let walCheckpointed = false;
 
-  if (doFix && beforeScan.legacyItems.length > 0) {
+  const skippedActive = [];
+  const fixableItems = [];
+  if (doFix) {
+    for (const item of beforeScan.legacyItems) {
+      if (isSessionActive(item.dir)) skippedActive.push(item);
+      else fixableItems.push(item);
+    }
+  }
+  const skippedActiveIds = new Set(skippedActive.flatMap((it) => [it.id, it.bareId]));
+
+  if (doFix && fixableItems.length > 0) {
     const mod = await findPersistenceModule();
     if (mod && mod.JsonlSessionPersistence) {
       migrationEngine = 'dsh-native';
       const storage = new mod.JsonlSessionPersistence({ directory: sessionsRoot, compression: 'zstd' });
-      for (const item of beforeScan.legacyItems) {
+      for (const item of fixableItems) {
         try {
           const h = await storage.open(item.id, 'write');
           await h.close();
@@ -244,7 +278,7 @@ async function inspectAndOptionallyFix(dshHome, doFix) {
       }
     } else {
       migrationEngine = 'builtin-fallback';
-      for (const item of beforeScan.legacyItems) {
+      for (const item of fixableItems) {
         try {
           if (builtinFallbackMigrateToV4(item)) migratedCount += 1;
           else migrationFailed += 1;
@@ -292,9 +326,10 @@ async function inspectAndOptionallyFix(dshHome, doFix) {
       sqliteInfo.engine = sqliteEngine;
       sqliteInfo.persisted_sessions = rows.length;
 
-      const migratedSet = new Set(beforeScan.legacyItems.flatMap((it) => [it.id, it.bareId]));
+      const migratedSet = new Set(fixableItems.flatMap((it) => [it.id, it.bareId]));
       const toUpdate = [];
       for (const r of rows) {
+        if (skippedActiveIds.has(r.id)) continue; // 活跃会话：不碰它的 session-query 记录
         const rev = String(r.revision || '');
         const isLongRev = rev.split(':').length > 5 || rev.length > 100;
         if (isLongRev) sqliteInfo.long_revisions += 1;
@@ -419,6 +454,7 @@ async function inspectAndOptionallyFix(dshHome, doFix) {
       legacy_remaining: legacyRemaining,
       migrated: migratedCount,
       migration_failed: migrationFailed,
+      skipped_active: skippedActive.length,
       migration_engine: migrationEngine,
     },
     sqlite: {
@@ -455,7 +491,7 @@ async function main() {
     console.log(`DSH_HOME     : ${report.dsh_home}`);
     console.log(`会话版本分布 : ${JSON.stringify(report.sessions.after_counts)} (总计 ${report.sessions.total}, 残留 <v4: ${report.sessions.legacy_remaining})`);
     if (doFix) {
-      console.log(`本次无损迁移 : 升级 ${report.sessions.migrated} 个会话 (engine=${report.sessions.migration_engine}, 失败=${report.sessions.migration_failed})`);
+      console.log(`本次无损迁移 : 升级 ${report.sessions.migrated} 个会话 (engine=${report.sessions.migration_engine}, 失败=${report.sessions.migration_failed}, 活跃跳过=${report.sessions.skipped_active})`);
     }
     if (report.sqlite.exists) {
       console.log(`SQLite 索引  : persisted_sessions=${report.sqlite.persisted_sessions} (未入库=${report.sqlite.unindexed_sessions}), 长 revision=${report.sqlite.long_revisions}, 对齐=${report.sqlite.revisions_aligned}, WAL=${report.sqlite.wal_mb}MB`);

@@ -157,8 +157,8 @@ esac
 exit 22
 `);
 
-  const cache = path.join(fx.state, 'repos.cache');
-  const cacheBefore = '# D2 pre-existing complete cache\ncache-a\n';
+  const cache = path.join(fx.state, 'repos.git.example.com_fixture.cache');
+  const cacheBefore = '# gitea repos cache; owner=fixture; api=https://git.example.com; source=api; at=2026-01-01 00:00:00\ncache-a\n';
   fs.writeFileSync(cache, cacheBefore);
   const env = {
     ...fx.env,
@@ -231,8 +231,8 @@ test('D3 HTTPS credentials stay out of argv, origin config, files, and output', 
   writeExecutable(path.join(fx.fakeBin, 'git'), `#!/bin/bash
 printf '%s\n' "$*" >> "$D3_GIT_CALLS"
 auth() {
-  user=$(${'$'}GIT_ASKPASS 'Username for fixture') || exit 91
-  pass=$(${'$'}GIT_ASKPASS 'Password for fixture') || exit 92
+  user=$(${'$'}GIT_ASKPASS "Username for 'https://forge.invalid': ") || exit 91
+  pass=$(${'$'}GIT_ASKPASS "Password for 'https://fixture-user@forge.invalid': ") || exit 92
   [ "$user" = fixture-user ] || exit 93
   [ "$pass" = "$D3_EXPECT_TOKEN" ] || exit 94
   printf '%s\n' "$1" >> "$D3_AUTH_CALLS"

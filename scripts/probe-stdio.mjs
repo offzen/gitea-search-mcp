@@ -114,6 +114,21 @@ function call(id, method, params) {
   });
 }
 
+/**
+ * 解析 search_code / search_gitea 首行的命中统计，供标准名与旧别名断言共用。
+ * 接受：精确数字（`全库命中 5 条`）、零命中（`全库命中 0 条`）、
+ * 以及 server 在 j.capped 时发出的下界形式（`全库命中 ≥ 200 条`，亦容忍 `>=`）。
+ * 工具报错（isError）、缺失文本、或首行没有「命中 … N 条」统计时一律判失败。
+ */
+function parseHitSummary(reply) {
+  if (!reply || reply.error || reply.result?.isError) return { ok: false, reason: 'tool-error' };
+  const text = reply.result?.content?.[0]?.text;
+  if (typeof text !== 'string' || !text.length) return { ok: false, reason: 'empty' };
+  const m = /命中\s*(≥|>=)?\s*(\d+)\s*条/.exec(text.split('\n')[0] ?? '');
+  if (!m) return { ok: false, reason: 'no-summary', text };
+  return { ok: true, count: Number(m[2]), lowerBound: Boolean(m[1]), text };
+}
+
 const ok = (condition, message) => {
   if (condition) {
     pass += 1;
@@ -139,10 +154,10 @@ try {
 
   const list = await call(2, 'tools/list');
   const names = (list.result?.tools ?? []).map((tool) => tool.name).sort();
-  const expectedNames = ['list_repositories', 'read_file', 'search_code', 'search_docs'];
+  const expectedNames = ['list_repositories', 'read_file', 'search_code', 'search_docs', 'sync_mirror'];
   ok(
     JSON.stringify(names) === JSON.stringify(expectedNames),
-    `tools/list 仅暴露 4 个中性工具名：${names.join(', ') || '(空)'}`,
+    `tools/list 仅暴露 5 个中性工具名：${names.join(', ') || '(空)'}`,
   );
 
   const result = await call(3, 'tools/call', { name: 'search_code', arguments: { query: QUERY } });
@@ -152,13 +167,14 @@ try {
   const firstLine = text.split('\n')[0] ?? '';
   console.log(`      查询 "${QUERY}" ⇒ ${bytes}B / ${text.split('\n').length} 行；首行：${firstLine.slice(0, 120)}`);
   ok(text.length > 0 && !result.result?.isError, 'search_code 返回了有效内容');
-  ok(/命中\s*\d+\s*条/.test(firstLine), '首行是「命中 N 条」统计（走的是真实检索路径，不是空壳）');
+  const hit = parseHitSummary(result);
+  ok(hit.ok, '首行是「命中 N 条 / ≥ N 条」统计（走的是真实检索路径，不是空壳）');
   ok(replacements === 0, `输出无 U+FFFD（本次 ${replacements} 个）`);
   ok(bytes <= MAX_OUT_BYTES, `输出 ${bytes}B 在上限 ${MAX_OUT_BYTES}B 内（护栏生效）`);
 
   const aliasResult = await call(4, 'tools/call', { name: 'search_gitea', arguments: { query: QUERY } });
   const aliasText = aliasResult.result?.content?.[0]?.text ?? '';
-  ok(!aliasResult.result?.isError && /命中\s*\d+\s*条/.test(aliasText.split('\n')[0] ?? ''), '旧别名 search_gitea 仍可透明转发并返回成功');
+  ok(parseHitSummary(aliasResult).ok, '旧别名 search_gitea 仍可透明转发并返回成功（命中统计与标准名同口径）');
 } catch (error) {
   fail += 1;
   if (spawnError) activeMethod = '启动';

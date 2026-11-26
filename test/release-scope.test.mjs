@@ -13,6 +13,8 @@ const setupMac = fs.readFileSync(new URL('../scripts/setup-macos.sh', import.met
 const setupWindows = fs.readFileSync(new URL('../scripts/setup-windows.ps1', import.meta.url), 'utf8');
 const windowsCi = fs.readFileSync(new URL('../.github/workflows/windows-ci.yml', import.meta.url), 'utf8');
 const packageGate = fs.readFileSync(new URL('../scripts/test-python-package.py', import.meta.url), 'utf8');
+const releaseWorkflow = fs.readFileSync(new URL('../.github/workflows/release.yml', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const releaseGuide = fs.readFileSync(new URL('../docs/dev/RELEASE.md', import.meta.url), 'utf8');
 
 test('package, lockfile, pyproject, and MCP server identity stay aligned', () => {
   assert.equal(pkg.name, 'gitea-search-mcp');
@@ -73,4 +75,23 @@ test('Windows hosted gates preserve UTF-8 output and native fallback prerequisit
   assert.match(windowsCi, /export GTS_BIN/);
   assert.match(setupWindows, /@\('python', @\(\)\), @\('py', @\('-3'\)\)/);
   assert.match(setupWindows, /pathlib\.Path\(sys\.executable\)\.resolve\(\)\.parent/);
+});
+
+test('private release candidates share verification and only public tags attest and publish', () => {
+  const steps = releaseWorkflow.split(/\n      - name: /).slice(1);
+  const verification = steps.filter((step) => /check-public-hygiene\.py|sha256sum/.test(step));
+  assert.equal(verification.length, 2);
+  for (const step of verification) assert.doesNotMatch(step, /^ {8}if:/m);
+  const publicSteps = steps.filter((step) => /repository\.private == false/.test(step));
+  assert.equal(publicSteps.length, 2);
+  assert.match(publicSteps[0], /uses: actions\/attest-build-provenance@v2/);
+  assert.match(publicSteps[1], /gh release upload/);
+  assert.match(releaseWorkflow, /uses:\s*\.\/\.github\/workflows\/ci\.yml/);
+  assert.match(releaseWorkflow, /uses:\s*\.\/\.github\/workflows\/windows-ci\.yml/);
+  assert.match(releaseWorkflow, /needs: \[preflight, ci, windows-ci\]/);
+  assert.doesNotMatch(releaseWorkflow, /continue-on-error:/);
+  const privateSteps = steps.filter((step) => /repository\.private == true/.test(step));
+  assert.equal(privateSteps.length, 1);
+  assert.match(privateSteps[0], /::notice::.*Attested releases are published only from the public release repository/);
+  assert.match(releaseGuide, /个人私有 GitHub 仓.*候选版本/);
 });

@@ -3,7 +3,7 @@
 [![License](https://img.shields.io/badge/License-Apache--2.0-C21325)](LICENSE)
 [![CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions/workflows/ci.yml)
 [![Windows CI](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml/badge.svg)](https://github.com/offzen/gitea-search-mcp/actions/workflows/windows-ci.yml)
-[![Version](https://img.shields.io/badge/Version-v2.0.2-blue)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/Version-v2.0.3-blue)](CHANGELOG.md)
 [![Archive](https://img.shields.io/badge/Archive-v0.1.1%20(Pure%20Node)-orange)](https://github.com/offzen/gitea-search-mcp/tree/legacy-0.1.x)
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20macOS%20%7C%20Windows%20(Native)-brightgreen)](docs/OPERATIONS.md#1-多场景部署与定时同步)
 [![Node](https://img.shields.io/badge/Node-%3E%3D20.11-success)](package.json)
@@ -15,7 +15,7 @@
 ## 核心能力
 
 - **双层混合检索**：`git grep` 检索全仓全部分支代码、路径与提交；`SQLite FTS5 + jieba` 检索默认分支中英文文档、会话与配置。
-- **上下文防爆窗护栏**：默认返回 Top 5 命中，单行 `≤ 2000B`、单次 `≤ 128 KiB` 安全截断，`read_file` 默认 400 行 / `60 KB` 分片读取。
+- **上下文防爆窗护栏**：默认返回 Top 5 命中，单行 `≤ 2000B`、单次 `≤ 128 KiB` 安全截断，`read_file` 默认 400 行 / `60 KB` 分片读取；另有单文件 `32 MiB`、子进程输出 `64 MiB`、并发 `4` 的资源护栏，且尊重 MCP 请求取消（子进程组随之终止）。
 - **任意 Git 源接入**：除 Gitea/Forgejo 定时同步外，任意 `git clone --mirror` 到 `<mirror_root>/<owner>/<repo>.git` 的仓库均可直接建库检索。
 - **静态 Schema 导出**：`node bin/mcp-server --dump-schema [--compact]` 离线导出 Function Calling JSON Schema（不读镜像、不启子进程）。
 
@@ -41,7 +41,7 @@ bash scripts/quickstart-local.sh /tmp/gitea-search-mcp-demo
 
 ## 主流 MCP 客户端接入
 
-**Claude Desktop / Cursor / Cline / Windsurf / Codex（标准 MCP JSON）**
+**Claude Desktop / Cursor / Cline / Windsurf（标准 MCP JSON）**
 
 ```json
 {
@@ -56,6 +56,25 @@ bash scripts/quickstart-local.sh /tmp/gitea-search-mcp-demo
     }
   }
 }
+```
+
+**Codex CLI（`~/.codex/config.toml`，不使用上面的 `mcpServers` JSON）**
+
+```toml
+[mcp_servers.gitea-search]
+command = "node"
+args = ["/path/to/gitea-search-mcp/bin/mcp-server"]
+
+[mcp_servers.gitea-search.env]
+GITEA_MIRROR_ROOT = "/srv/gitea-mirror"
+GITEA_OWNERS = "my-org,my-team"
+```
+
+或一条命令写入同一配置（已用 `codex-cli 0.172.0` 在隔离 `CODEX_HOME` 下实测生成上述 TOML）：
+
+```bash
+codex mcp add gitea-search --env GITEA_MIRROR_ROOT=/srv/gitea-mirror --env GITEA_OWNERS=my-org,my-team -- node /path/to/gitea-search-mcp/bin/mcp-server
+codex mcp list   # 核对；codex mcp get gitea-search 查看详情（env 值会被打码）
 ```
 
 **DeepSeek Harness (DSH `cordis.patch.yml`)**
@@ -79,7 +98,7 @@ bash scripts/quickstart-local.sh /tmp/gitea-search-mcp-demo
 
 ## MCP 工具一览
 
-`tools/list` 仅暴露 4 个中性标准名，`tools/call` 同时透明兼容两族历史别名（保留至 `v3.0.0` 前）：
+`tools/list` 仅暴露 5 个中性标准名，`tools/call` 同时透明兼容两族历史别名（保留至 `v3.0.0` 前）：
 
 | 标准工具名 | 兼容旧名（`tools/call`） | 用途 |
 |---|---|---|
@@ -87,6 +106,7 @@ bash scripts/quickstart-local.sh /tmp/gitea-search-mcp-demo
 | `search_docs` | `search_gitea_docs` / `search_gitorca_docs` | 默认分支 SQLite FTS5 + `jieba` 文档、会话、配置、脚本检索 |
 | `read_file` | `read_gitea_file` / `read_gitorca_file` | 按 `owner/repo`、路径和可选 `ref` 按需切片精读 |
 | `list_repositories` | `list_gitea_repos` / `list_gitorca_repos` | 列出本地已镜像仓库（`owner/repo`） |
+| `sync_mirror` | — | 显式增量同步镜像与索引（唯一会写镜像的工具；其余四个严格只读） |
 
 ## 文档导航
 
@@ -94,7 +114,7 @@ bash scripts/quickstart-local.sh /tmp/gitea-search-mcp-demo
 |---|---|
 | **[docs/GETTING-STARTED.md](docs/GETTING-STARTED.md)** | 新用户 3～10 分钟零门槛入门：裸镜像概念、三选一上手路线与各客户端接入 |
 | **[docs/POST-INSTALL.md](docs/POST-INSTALL.md)** | 安装后闭环验收：配置核验、首次同步、MCP 探针与宿主调用确认 |
-| **[docs/USAGE.md](docs/USAGE.md)** | 四工具与 `gts` CLI 参数速查及“先定位、再精读”范例 |
+| **[docs/USAGE.md](docs/USAGE.md)** | 五工具（4 只读 + `sync_mirror`）与 `gts` CLI 参数速查及“先定位、再精读”范例 |
 | **[docs/OPERATIONS.md](docs/OPERATIONS.md)** | Linux / macOS / Windows 部署、定时同步、环境变量全表与排障 |
 | **[UPGRADING.md](UPGRADING.md)** | `v1.2.x` 老用户平滑升级、索引兼容与回滚指南 |
 | **[docs/BOUNDARIES.md](docs/BOUNDARIES.md)** / **[docs/TOOL-NAMING.md](docs/TOOL-NAMING.md)** | 能力边界说明 / 三层工具命名与兼容别名模型 |

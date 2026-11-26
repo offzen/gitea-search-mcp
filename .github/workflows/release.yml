@@ -6,17 +6,18 @@ on:
       - 'v*'
 
 permissions:
-  contents: write
-  id-token: write
-  attestations: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  release:
-    name: Build, Verify & Attest Release Artifacts
+  preflight:
+    name: Verify Tag Metadata & Public Hygiene
     if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
-    env:
-      PYTHONDONTWRITEBYTECODE: '1'
+    timeout-minutes: 10
     steps:
       - name: Checkout tag
         uses: actions/checkout@v4
@@ -37,12 +38,55 @@ jobs:
           set -euo pipefail
           TAG_VER="${GITHUB_REF_NAME#v}"
           PKG_VER="$(node -p "require('./package.json').version")"
+          LOCK_VER="$(node -p "require('./package-lock.json').version")"
           PY_VER="$(python3 -c "import tomllib, pathlib; print(tomllib.loads(pathlib.Path('pyproject.toml').read_text())['project']['version'])")"
-          if [[ "$TAG_VER" != "$PKG_VER" || "$TAG_VER" != "$PY_VER" ]]; then
-            echo "::error::Tag ${GITHUB_REF_NAME} mismatches package.json (${PKG_VER}) or pyproject.toml (${PY_VER})"
+          if [[ "$TAG_VER" != "$PKG_VER" || "$TAG_VER" != "$LOCK_VER" || "$TAG_VER" != "$PY_VER" ]]; then
+            echo "::error::Tag ${GITHUB_REF_NAME} mismatches package.json (${PKG_VER}), package-lock.json (${LOCK_VER}), or pyproject.toml (${PY_VER})"
             exit 1
           fi
           python3 scripts/check-public-hygiene.py
+
+  ci:
+    name: Linux + macOS + Packaging Gate
+    if: github.server_url == 'https://github.com'
+    needs: [preflight]
+    uses: ./.github/workflows/ci.yml
+    permissions:
+      contents: read
+
+  windows-ci:
+    name: Windows Native Gate
+    if: github.server_url == 'https://github.com'
+    needs: [preflight]
+    uses: ./.github/workflows/windows-ci.yml
+    permissions:
+      contents: read
+
+  release:
+    name: Build, Verify & Attest Release Artifacts
+    if: github.server_url == 'https://github.com'
+    needs: [preflight, ci, windows-ci]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout tag
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Set up Node.js 22
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
 
       - name: Build & verify Python (wheel + sdist) and npm (.tgz) artifacts
         run: |
@@ -56,11 +100,13 @@ jobs:
           (cd release-dist && rm -f SHA256SUMS && sha256sum *.whl *.tar.gz *.tgz > SHA256SUMS)
 
       - name: Attest build provenance (Sigstore / GitHub Attestations)
+        if: ${{ github.event.repository.private == false }}
         uses: actions/attest-build-provenance@v2
         with:
           subject-path: 'release-dist/*'
 
       - name: Attach verified artifacts to GitHub Release
+        if: ${{ github.event.repository.private == false }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -79,3 +125,7 @@ jobs:
           fi
           rm -f "$NOTES_FILE"
           gh release upload "$GITHUB_REF_NAME" release-dist/* --clobber
+
+      - name: Report private release candidate verification
+        if: ${{ github.event.repository.private == true }}
+        run: echo "::notice::Release candidate verification completed. Attested releases are published only from the public release repository."

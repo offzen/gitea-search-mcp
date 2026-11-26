@@ -2,6 +2,10 @@
 
 `v2.0+` 将项目从 DeepSeek Harness (DSH) 专属插件演进为**面向任意 MCP 宿主的通用 Gitea / Forgejo / 本地 Git 裸镜像检索引擎**（支持 Claude Desktop、Cursor、Cline、Windsurf、Codex、DSH 等），同时完整继承 `v1.2.3` 的跨平台（Linux / macOS / 原生 Windows）可靠性修复。
 
+> 注（v2.0.3）：从 `v2.0.2` 升级无需改配置、无需重建索引；`2.0.2` 因中途失败而卡在 `INDEX_REBUILD_REQUIRED` 的索引（行均为 `owner/repo`）会在下一次增量构建时自愈。需留意的行为变化：`branch` 过滤改为精确匹配（要前缀请写 `main*`）；`search_docs` 的 `repo` 与 `gts --repos` 语义统一；`sync.sh` 新增全局锁（并发时退出码 75 / `SYNC_BUSY`）；新增环境变量 `GITEA_MAX_BLOB_BYTES`、`GITEA_MAX_CHILD_OUTPUT_BYTES`、`GITEA_MAX_CONCURRENCY`、`GITEA_SYNC_TIMEOUT`（见 `docs/OPERATIONS.md`）。
+
+> 注（v2.0.3 行为变化）：`search_code` 不再接受 `sync` 参数，它现在是严格只读工具；需要刷新镜像时先调用新增的 `sync_mirror` 工具（或定时跑 `sync.sh`）。旧调用方仍传 `sync:true` 时不会报错，但不会同步，结果里会带 `SYNC_MOVED` 提示。`tools/list` 因此从 4 个增加到 5 个；若宿主对工具白名单做了固定（例如 Codex `enabled_tools`），请加入 `sync_mirror`。
+
 > 注：已运行 `v2.0.0` 的用户升级至 `v2.0.1` 无需修改任何配置或重建索引，直接拉取新 Tag 重载宿主即可。
 
 本版本为老用户提供**平滑兼容过渡期**：旧工具名、旧环境变量、旧默认配置路径与 CLI 别名均保留至 `v3.0.0` 之前。
@@ -14,7 +18,7 @@
 |---|---|---|---|
 | **仓库与包名** | `dsh-gitea-search` | `gitea-search-mcp` | GitHub 自动重定向旧仓库 URL；建议择机更新本地 `git remote` |
 | **运行依赖** | Node.js ≥ 20.11 + Python ≥ 3.10 + `jieba` + Git ≥ 2.25 | **保持不变（Python 为必备依赖）** | 无新增运行时依赖；不提供无 Python 降级模式 |
-| **MCP 裸工具名** | `search_gitea` / `search_gitea_docs` / `read_gitea_file` / `list_gitea_repos` | `search_code` / `search_docs` / `read_file` / `list_repositories` | `tools/list` 仅返回新名；`tools/call` **继续透明转发两族旧名**（`search_gitea*`、`search_gitorca*`）并在 stderr 输出废弃告警 |
+| **MCP 裸工具名** | `search_gitea` / `search_gitea_docs` / `read_gitea_file` / `list_gitea_repos` | `search_code` / `search_docs` / `read_file` / `list_repositories` / `sync_mirror`（`v2.0.3` 新增） | `tools/list` 仅返回 5 个标准新名；`tools/call` **继续透明转发两族旧名**（`search_gitea*`、`search_gitorca*`）并在 stderr 输出废弃告警 |
 | **环境变量** | `GITEA_*` 与部分 `GITQ_*` 混用 | 统一以 `GITEA_*` 为主 | 旧 `GITQ_*` / `GTS_BIN` / `GITQ_BIN` 继续兜底生效 |
 | **默认配置目录** | `~/.config/dsh-gitea-search/config.json` | `~/.config/gitea-search-mcp/config.json` | 新路径不存在时自动回退读取旧路径并提示迁移 |
 | **CLI 命令入口** | `gts` / `gitq` / `dsh-search` | **全部保留** | 现有脚本和 cron 任务无需修改 |
@@ -29,7 +33,7 @@
 1. **拉取新版本代码并更新依赖**：
    ```bash
    git fetch --tags
-   git checkout v2.0.1
+   git checkout v2.0.3
    npm ci --omit=dev
    python3 -m pip install --force-reinstall '.[fts]'
    ```
@@ -43,7 +47,7 @@
    # Windows (PowerShell)
    powershell -ExecutionPolicy Bypass -File scripts\doctor-mcp.ps1
    ```
-   确认握手成功、4 个标准工具正常列出且索引检查无报错。
+   确认握手成功、5 个标准工具正常列出且索引检查无报错。
 
 3. **重载 MCP 宿主**：重启或重载你的 DSH / Claude Desktop / Cursor / Cline。
 
@@ -60,10 +64,10 @@
    ```
    *(如存在 `gitea-fts.sqlite-wal` / `gitea-fts.sqlite-shm` 文件，请先确保无正在运行的同步/索引任务，或一并备份。)*
 
-2. **拉取新版本（`v2.0.1`）并重装依赖**：
+2. **拉取新版本（`v2.0.3`）并重装依赖**：
    ```bash
    git fetch --tags
-   git checkout v2.0.1
+   git checkout v2.0.3
    npm ci --omit=dev
    python3 -m pip install --force-reinstall '.[fts]'
    ```
@@ -89,7 +93,7 @@
 ### Step A：零契约变更升级内核（推荐先完成并观察）
 
 - **完全不动** `cordis.patch.yml` 中的 `serverName`、不改已有 Prompt/Skill 中的 `search_gitea*` 名称、不改旧 `GITQ_*` 环境变量；
-- 仅更新代码目录到 `v2.0.1`（若从 `v1.2.2` 升级则按路径 B 重建索引）并重载 DSH；
+- 仅更新代码目录到 `v2.0.3`（若从 `v1.2.2` 升级则按路径 B 重建索引）并重载 DSH；
 - 验证现有任务中的 `search_gitea` / `search_gitea_docs` / `read_gitea_file` / `list_gitea_repos` 均可正常返回（stderr 会打印预期中的废弃提示，不影响工具返回值）。
 
 ### Step B：择机迁移至通用契约（Step A 稳定后再做）
@@ -98,10 +102,11 @@
 2. 将 `GITQ_*` / `GTS_BIN` 环境变量替换为对应 `GITEA_*` 名称（见第 4 节对照表）；
 3. 将配置文件从 `~/.config/dsh-gitea-search/config.json` 复制迁移到 `~/.config/gitea-search-mcp/config.json`；
 4. 在宿主工具表中确认新注册名后，再同步更新你的 DSH Skill 与系统提示词中的工具名：
-   - `search_gitea` → `search_code`
+   - `search_gitea` → `search_code`（`v2.0.3` 起严格只读，如需显式同步改调 `sync_mirror`）
    - `search_gitea_docs` → `search_docs`
    - `read_gitea_file` → `read_file`
    - `list_gitea_repos` → `list_repositories`
+   - 新增：`sync_mirror`（显式增量同步镜像与索引）
 
 ---
 

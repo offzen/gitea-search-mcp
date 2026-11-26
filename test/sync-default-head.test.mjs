@@ -177,8 +177,9 @@ exec "$C4_REAL_GIT" "$@"
 
   assertFailedClosed(fx, result, 'HEAD_UNVERIFIED_REMOTE_UNREACHABLE');
   const calls = fs.readFileSync(gitCalls, 'utf8').trim().split('\n');
-  assert.match(calls[0], /remote update --prune/);
-  assert.ok(calls.slice(1).some((line) => /ls-remote --symref/.test(line)), calls.join('\n'));
+  const fetchIdx = calls.findIndex((line) => /remote update --prune/.test(line));
+  assert.ok(fetchIdx >= 0, calls.join('\n'));
+  assert.ok(calls.slice(fetchIdx + 1).some((line) => /ls-remote --symref/.test(line)), calls.join('\n'));
   assert.doesNotMatch(`${result.stdout}\n${result.stderr}`, /C4_CREDENTIAL_CANARY_93AF/);
 });
 
@@ -212,7 +213,42 @@ test('C4 fails closed after cloning an empty upstream', { skip: !POSIX }, (t) =>
   runGit(['--git-dir', fx.upstream, 'update-ref', '-d', 'refs/heads/main'], fx.gitEnv);
   fs.rmSync(fx.bare, { recursive: true, force: true });
 
-  const result = runSync(fx, installCloneWrapper(fx));
+  // 2.0.3：默认放行「全新空仓库」；GITQ_EMPTY_REMOTE=fail 保留 2.0.2 的 fail-closed 行为。
+  const result = runSync(fx, { ...installCloneWrapper(fx), GITQ_EMPTY_REMOTE: 'fail' });
 
   assertFailedClosed(fx, result, 'HEAD_UNVERIFIED_REMOTE_HEAD');
+});
+
+test('C4 (2.0.3) a freshly cloned empty upstream is a success by default and is picked up after its first commit', { skip: !POSIX }, (t) => {
+  const fx = makeFixture(t);
+  // A genuinely empty upstream (a local-path clone of an upstream that merely had its branch deleted
+  // would still copy the unreachable objects, which is not what a brand-new forge repository looks like).
+  const empty = path.join(fx.dir, 'empty-upstream.git');
+  runGit(['init', '-q', '--bare', empty], fx.gitEnv);
+  runGit(['--git-dir', empty, 'symbolic-ref', 'HEAD', 'refs/heads/main'], fx.gitEnv);
+  fs.rmSync(fx.bare, { recursive: true, force: true });
+
+  const first = runSync(fx, { ...installCloneWrapper(fx), C4_UPSTREAM: empty });
+  assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+  assert.equal(first.stderr, '');
+
+  // Still a success on later rounds: the mirror never held any objects.
+  const again = runSync(fx);
+  assert.equal(again.status, 0, `stdout:\n${again.stdout}\nstderr:\n${again.stderr}`);
+
+  // After the first commit lands, the next round converges HEAD and the content is present.
+  runGit(['-C', fx.work, 'push', '-q', empty, 'main:refs/heads/main'], fx.gitEnv);
+  const filled = runSync(fx);
+  assert.equal(filled.status, 0, `stdout:\n${filled.stdout}\nstderr:\n${filled.stderr}`);
+  assert.equal(runGit(['--git-dir', fx.bare, 'symbolic-ref', 'HEAD'], fx.gitEnv), 'refs/heads/main');
+  assert.equal(runGit(['--git-dir', fx.bare, 'rev-parse', '--verify', 'HEAD'], fx.gitEnv),
+    runGit(['-C', fx.work, 'rev-parse', 'main'], fx.gitEnv));
+});
+
+test('N8 sync marks mirror repos gc.autoDetach=false so a daemonised gc cannot keep the sync lock', { skip: !POSIX }, (t) => {
+  const fx = makeFixture(t);
+  assert.equal(spawnSync(REAL_GIT, ['--git-dir', fx.bare, 'config', '--get', 'gc.autoDetach'], { env: fx.gitEnv }).status, 1);
+  const result = runSync(fx);
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.equal(runGit(['--git-dir', fx.bare, 'config', '--get', 'gc.autoDetach'], fx.gitEnv), 'false');
 });

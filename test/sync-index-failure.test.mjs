@@ -195,5 +195,5 @@ exit 1
     GITQ_ENUM: 'ssh', GITEA_SSH_HOST: 'fixture-admin', R2_FETCH_FAIL: '1',
   });
   assert.equal(failed.result.status, 1, failed.result.stderr);
-  assert.equal(failed.call, `${indexer} --build --no-global-prune`);
+  assert.equal(failed.call, `${indexer} --build --no-global-prune --skip-repos fixture/demo`);
 });

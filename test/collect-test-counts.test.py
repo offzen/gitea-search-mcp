@@ -58,7 +58,7 @@ class CollectCountsTest(unittest.TestCase):
                 self.assertIn(text, mod.validate_node(value) or "")
 
     def test_suite_inventory_includes_all_product_regressions(self) -> None:
-        self.assertEqual(len(mod.PYTHON_SUITES), 7)
+        self.assertEqual(len(mod.PYTHON_SUITES), 8)
         for suite in (
             "test/collect-test-counts.test.py",
             "test/dependency-missing.test.py",
@@ -66,6 +66,7 @@ class CollectCountsTest(unittest.TestCase):
             "test/fts-result-contract.test.py",
             "test/profile-yaml.test.py",
             "test/repo-zero-hit.test.py",
+            "test/indexer-resilience.test.py",
             "test/documentation-contract.test.py",
         ):
             self.assertIn(suite, mod.PYTHON_SUITES)
@@ -87,7 +88,7 @@ class CollectCountsTest(unittest.TestCase):
 
     def test_main_runs_without_output_and_writes_schema2_when_requested(self) -> None:
         node = {"total": 124, "pass": 120, "fail": 0, "cancelled": 0, "skipped": 4, "todo": 0}
-        python = [{"suite": f"suite-{i}", "ran": True, "ok": True, "tests": i + 1} for i in range(7)]
+        python = [{"suite": f"suite-{i}", "ran": True, "ok": True, "tests": i + 1} for i in range(8)]
         with mock.patch.object(mod, "node_counts", return_value=(node, "tap", True)), \
              mock.patch.object(mod, "python_suites", return_value=(python, True)), \
              mock.patch.object(mod, "e2e_count", return_value=({"pass": 31, "fail": 0}, True)), \
@@ -103,7 +104,7 @@ class CollectCountsTest(unittest.TestCase):
             data = json.loads((pathlib.Path(td) / "counts.json").read_text())
         self.assertEqual(data["schema"], 2)
         self.assertEqual(data["node_skipped"], 4)
-        self.assertEqual(data["python_suites"], 7)
+        self.assertEqual(data["python_suites"], 8)
         self.assertEqual(data["e2e"], {"pass": 31, "fail": 0})
 
     def test_main_refuses_zero_or_below_floor_suites(self) -> None:

@@ -14,9 +14,9 @@ import { fileURLToPath } from 'node:url';
 import { createServer, SERVER_NAME, SERVER_VERSION, TOOL_ALIASES } from '../lib/server.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const EXPECTED_TOOLS = ['list_repositories', 'read_file', 'search_code', 'search_docs'];
+const EXPECTED_TOOLS = ['list_repositories', 'read_file', 'search_code', 'search_docs', 'sync_mirror'];
 
-test('createServer() exposes only the 4 neutral tool names in tools/list', async () => {
+test('createServer() exposes only the 5 neutral tool names in tools/list', async () => {
   const server = createServer();
   const listHandler = server._requestHandlers?.get('tools/list');
   assert.ok(listHandler, 'tools/list handler must be registered');

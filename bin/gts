@@ -47,9 +47,9 @@ for p in _SEARCH_PATHS:
 # 仍然失败时不再静默：记录原因，由 --repos 分支向 stderr 明确报告。
 _MIRROR_STATE_IMPORT_ERROR = None
 try:
-    from mirror_state import read_sync_state, sync_summary
+    from mirror_state import parse_sync_status, read_sync_state, sync_summary
 except ImportError as _exc:
-    read_sync_state = sync_summary = None
+    parse_sync_status = read_sync_state = sync_summary = None
     _MIRROR_STATE_IMPORT_ERROR = str(_exc)
 
 try:
@@ -67,7 +67,7 @@ OWNER = ""
 OWNERS = []
 MIRROR = ""
 SYNC = ""
-GN = ["git", "-c", "core.pager=cat", "-c", "color.ui=false",
+GN = ["git", "--no-replace-objects", "-c", "core.pager=cat", "-c", "color.ui=false",
       # core.quotePath 默认 true：非 ASCII 路径会被转义成 "\345\257\274…"，
       # 中文文件名直接不可用（也读不出来）。必须显式关掉。
       "-c", "core.quotePath=false"]
@@ -94,6 +94,96 @@ def normalize_git_path(p):
         s = s.replace("\\", "/")
     # POSIX：反斜杠是合法文件名字符，禁止转换；仅剥除首部 "/" 以对齐 git 的相对路径语义
     return s.lstrip("/")
+
+
+SYNC_BUSY_RC = 75      # sync.sh 抢不到全局锁时的退出码（EX_TEMPFAIL）
+SYNC_TIMEOUT_RC = 124
+
+
+def sync_timeout_seconds():
+    try:
+        v = float(os.environ.get("GITEA_SYNC_TIMEOUT", "") or 900)
+    except ValueError:
+        v = 900.0
+    return v if v > 0 else 900.0
+
+
+def _kill_descendants_posix(root_pid):
+    """按父子关系终止 root_pid 及其全部后代（在 MCP 共享进程组模式下用于内部超时清理）。"""
+    try:
+        out = subprocess.check_output(["ps", "-eo", "pid=,ppid="], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        out = ""
+    children = {}
+    for line in out.splitlines():
+        parts = line.split()
+        if len(parts) == 2 and parts[0].isdigit() and parts[1].isdigit():
+            children.setdefault(int(parts[1]), []).append(int(parts[0]))
+    order = []
+    stack = [root_pid]
+    seen = set()
+    while stack:
+        cur = stack.pop()
+        if cur in seen:
+            continue
+        seen.add(cur)
+        order.append(cur)
+        stack.extend(children.get(cur, ()))
+    for pid in reversed(order):
+        try:
+            os.kill(pid, 9)
+        except OSError:
+            pass
+
+
+def run_sync(argv, env, timeout, capture_status=False):
+    """运行 sync.sh：
+    - 当由 MCP server（detached 进程组）托管启动时（GITEA_MANAGED_PGROUP=1），不再另建新会话，
+      确保客户端取消 MCP 请求时 kill(-gts_pid) 能原子终止 sync.sh 及其全部子进程；
+    - 独立 CLI 调用时保持 start_new_session=True，在超时或 SIGTERM/SIGINT 时整组终止。"""
+    managed_pgroup = (not IS_WINDOWS) and os.environ.get("GITEA_MANAGED_PGROUP") == "1"
+    own_session = (not IS_WINDOWS) and (not managed_pgroup)
+    kwargs = {"start_new_session": True} if own_session else {}
+    if capture_status:
+        kwargs["stdout"] = subprocess.PIPE
+    p = subprocess.Popen(argv, env=env, stderr=subprocess.PIPE, text=True, encoding="utf-8", errors="replace", **kwargs)
+    prev_handlers = {}
+    if own_session:
+        import signal
+        def _forward_term(signum, _frame):
+            try:
+                os.killpg(p.pid, 9)
+            except OSError:
+                pass
+            sys.exit(128 + signum)
+        for sig in (signal.SIGTERM, signal.SIGINT):
+            try:
+                prev_handlers[sig] = signal.signal(sig, _forward_term)
+            except (ValueError, OSError):
+                pass
+    try:
+        out, err = p.communicate(timeout=timeout)
+        return p.returncode, err or "", out or ""
+    except subprocess.TimeoutExpired:
+        try:
+            if IS_WINDOWS:
+                p.kill()
+            elif own_session:
+                os.killpg(p.pid, 9)
+            else:
+                _kill_descendants_posix(p.pid)
+        except OSError:
+            pass
+        _out, err = p.communicate()
+        return SYNC_TIMEOUT_RC, err or "", ""
+    finally:
+        if prev_handlers:
+            import signal
+            for sig, handler in prev_handlers.items():
+                try:
+                    signal.signal(sig, handler)
+                except (ValueError, OSError):
+                    pass
 
 
 def die(msg, code=2):
@@ -172,6 +262,32 @@ def fnmatch_any(name, pat):
     return pl in nl
 
 
+def branch_matches(ref, pat):
+    """分支过滤：无通配符时精确匹配（2.0.3，原为子串匹配，`main` 会命中 `maintenance`）；
+    含 * ? [ 时对完整 ref 名做大小写敏感的 fnmatch。"""
+    pat = (pat or "").strip()
+    if not pat:
+        return False
+    if any(ch in pat for ch in "*?["):
+        return fnmatch.fnmatchcase(ref, pat)
+    return ref == pat
+
+
+_REF_BAD_RE = re.compile(r"[\x00-\x1f\x7f\s:\\?*\[]|\.\.")
+
+
+def valid_ref(ref):
+    """ref 校验：允许合法 UTF-8 分支/标签名（如 功能/中文）与常见修订（HEAD~1），
+    不得以 '-' / '/' / '.' 开头，不含 ':'、空白、控制字符、'..' 与 '@{'。"""
+    if not isinstance(ref, str) or not ref:
+        return False
+    if ref.startswith(("-", "/", ".")) or ref.endswith(("/", ".")):
+        return False
+    if "//" in ref or "@{" in ref:
+        return False
+    return _REF_BAD_RE.search(ref) is None
+
+
 def _git_error(stage, rc, message):
     text = str(message or "").strip() or f"git {stage} failed"
     return {"stage": stage, "rc": rc, "message": text[:500]}
@@ -182,13 +298,16 @@ def refs_of(gitdir, all_refs=False):
     try:
         p = subprocess.run(
             GN + [f"--git-dir={gitdir}", "for-each-ref", "--format=%(refname:short)", prefix],
-            capture_output=True, text=True,
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
         )
     except OSError as exc:
         return [], _git_error("refs", None, exc)
     if p.returncode != 0:
         return [], _git_error("refs", p.returncode, p.stderr)
     return [l for l in p.stdout.splitlines() if l.strip()], None
+
+
+STREAM_LINE_CAP = 65536
 
 
 def _stream(cmd, cap, stage, ok_rcs=(0,)):
@@ -206,6 +325,9 @@ def _stream(cmd, cap, stage, ok_rcs=(0,)):
                 # 逐行读取时行终止符可能是 "\n"(LF) 或 "\r\n"(CRLF)，两种都要剥除。
                 # 注意不能用 rstrip("\r\n")：那会把行内容尾部的其它 CR 一并吃掉。
                 s = raw.decode("utf-8", "replace")
+                if len(s) > STREAM_LINE_CAP:
+                    # 2.0.3：单行硬上限，防止压缩/打包产物的超长行让 JSON 输出与 Node 侧缓冲无界增长。
+                    s = s[:STREAM_LINE_CAP] + "\n"
                 if s.endswith("\n"):
                     s = s[:-1]
                 if s.endswith("\r"):
@@ -257,6 +379,21 @@ def split_grep(line, ref, files_only=False):
     return path, lineno, text
 
 
+def resolve_search_oid(git_cmd, ref):
+    for suffix in ("^{commit}", "^{}"):
+        try:
+            p = subprocess.run(
+                git_cmd + ["rev-parse", "--verify", "--end-of-options", f"{ref}{suffix}"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+            )
+        except OSError as exc:
+            return None, _git_error("rev-parse", None, exc)
+        oid = p.stdout.strip()
+        if p.returncode == 0 and re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", oid):
+            return oid, None
+    return None, _git_error("rev-parse", p.returncode, p.stderr)
+
+
 def search_repo(repo, a, and_words=None):
     """返回 (records, capped, error)；repo 是 canonical owner/repo。"""
     owner, name = repo.split("/", 1)
@@ -269,14 +406,14 @@ def search_repo(repo, a, and_words=None):
         if any(w.upper() == "HEAD" for w in want):
             try:
                 p = subprocess.run(GN + [f"--git-dir={gitdir}", "symbolic-ref", "--short", "HEAD"],
-                                   capture_output=True, text=True)
+                                   capture_output=True, text=True, encoding="utf-8", errors="replace")
             except OSError as exc:
                 return [], False, _git_error("symbolic-ref", None, exc)
             if p.returncode not in (0, 1):
                 return [], False, _git_error("symbolic-ref", p.returncode, p.stderr)
             head = p.stdout.strip()
             want = [w for w in want if w.upper() != "HEAD"] + ([head] if head else [])
-        rl = [r for r in rl if any(fnmatch_any(r, w) for w in want)]
+        rl = [r for r in rl if any(branch_matches(r, w) for w in want)]
     if not rl:
         return [], False, None
     recs, capped = [], False
@@ -294,41 +431,47 @@ def search_repo(repo, a, and_words=None):
                 pattern_args.append("--and")
             pattern_args += ["-e", w]
 
+    git_cmd = GN + [f"--git-dir={gitdir}"]
     for ref in rl:
+        # Resolve each ref once under --no-replace-objects so content/path/message
+        # modes and downstream secret scans all observe the exact same immutable snapshot.
+        oid, error = resolve_search_oid(git_cmd, ref)
+        if error:
+            return recs, capped, error
         if a.mode == "content":
             if a.count:
-                cmd = GN + [f"--git-dir={gitdir}", "grep", "-n", "-I", "--no-color"]
+                cmd = git_cmd + ["grep", "-n", "-I", "--no-color"]
                 if not a.case_sensitive:
                     cmd.append("-i")
                 cmd.append("-E" if (a.regex and not and_words) else "-F")
                 if a.word:
                     cmd.append("-w")
-                cmd += pattern_args + [ref]
+                cmd += pattern_args + [oid]
                 out, cap, error = _stream(cmd, 500000, "grep", ok_rcs=(0, 1))
                 capped = capped or cap
                 if error:
                     return recs, capped, error
-                recs.append((repo, ref, "", "", str(len(out))))
+                recs.append((repo, ref, "", "", str(len(out)), oid))
                 continue
             if a.files:
-                cmd = GN + [f"--git-dir={gitdir}", "grep", "-l", "-I", "--no-color"]
+                cmd = git_cmd + ["grep", "-l", "-I", "--no-color"]
             else:
-                cmd = GN + [f"--git-dir={gitdir}", "grep", "-n", "-z", "-I", "--no-color"]
+                cmd = git_cmd + ["grep", "-n", "-z", "-I", "--no-color"]
             if not a.case_sensitive:
                 cmd.append("-i")
             cmd.append("-E" if (a.regex and not and_words) else "-F")
             if a.word:
                 cmd.append("-w")
-            cmd += pattern_args + [ref]
+            cmd += pattern_args + [oid]
             out, cap, error = _stream(cmd, per_cap, "grep", ok_rcs=(0, 1))
             capped = capped or cap
             if error:
                 return recs, capped, error
             for line in out:
-                path, lineno, text = split_grep(line, ref, files_only=a.files)
-                recs.append((repo, ref, path, lineno, text))
+                path, lineno, text = split_grep(line, oid, files_only=a.files)
+                recs.append((repo, ref, path, lineno, text, oid))
         elif a.mode == "path":
-            cmd = GN + [f"--git-dir={gitdir}", "ls-tree", "-r", "--name-only", ref]
+            cmd = git_cmd + ["ls-tree", "-r", "--name-only", oid]
             out, cap, error = _stream(cmd, 200000, "ls-tree")
             capped = capped or cap
             if error:
@@ -337,26 +480,29 @@ def search_repo(repo, a, and_words=None):
                 try:
                     rx = re.compile(a.pattern, 0 if a.case_sensitive else re.I)
                 except re.error as e:
-                    die(f"正则不合法：{e}")
+                    return recs, capped, _git_error("regex", None, f"正则不合法：{e}")
                 hits = [l for l in out if rx.search(l)]
             else:
                 needle = a.pattern if a.case_sensitive else a.pattern.lower()
                 hits = [l for l in out if needle in (l if a.case_sensitive else l.lower())]
             for h in hits[:per_cap]:
-                recs.append((repo, ref, h, "", ""))
+                recs.append((repo, ref, h, "", "", oid))
             if len(hits) > per_cap:
                 capped = True
         else:  # message
-            cmd = GN + [f"--git-dir={gitdir}", "log", ref, "--no-color",
-                        "--date=short", "--format=%h\t%ad\t%s"]
+            cmd = git_cmd + ["log", oid, "--no-color",
+                             "--date=short", "--format=%h\t%ad\t%s"]
             out, cap, error = _stream(cmd, 200000, "log")
             capped = capped or cap
             if error:
                 return recs, capped, error
-            try:
-                rx = re.compile(a.pattern, 0 if a.case_sensitive else re.I)
-            except re.error as e:
-                die(f"正则不合法：{e}")
+            rx = None
+            if a.regex:
+                # 2.0.3：字面量（默认）模式不再把 query 当正则编译（`fix(auth` 曾直接 die）。
+                try:
+                    rx = re.compile(a.pattern, 0 if a.case_sensitive else re.I)
+                except re.error as e:
+                    return recs, capped, _git_error("regex", None, f"正则不合法：{e}")
             for line in out:
                 parts = line.split("\t", 2)
                 if len(parts) < 3:
@@ -366,7 +512,7 @@ def search_repo(repo, a, and_words=None):
                 if (rx.search(subj) if a.regex else
                         (a.pattern.lower() in target.lower() if not a.case_sensitive
                          else a.pattern in target)):
-                    recs.append((repo, "-", h, d, subj))
+                    recs.append((repo, "-", h, d, subj, None))
                     if len(recs) >= per_cap:
                         capped = True
                         break
@@ -396,7 +542,7 @@ def fmt_text(recs, a, stats):
         total = len(seen)
     else:
         seen = set()
-        for repo, ref, path, lineno, text in recs:
+        for repo, ref, path, lineno, text, _oid in recs:
             if a.mode == "content":
                 s = f"{repo}@{ref}:{path}:{lineno}:{text}"
             elif a.mode == "path":
@@ -433,25 +579,29 @@ def fmt_text(recs, a, stats):
 def fmt_json(recs, a, stats):
     results = []
     seen = set()
-    for repo, ref, path, lineno, text in recs:
-        key = (repo, ref, path, lineno, text)
+    for repo, ref, path, lineno, text, oid in recs:
+        key = (repo, ref, path, lineno, text, oid)
         if key in seen:
             continue
         seen.add(key)
         if a.mode == "content":
             results.append({"repo": repo, "ref": ref, "path": path,
-                            "line": int(lineno) if lineno.isdigit() else None, "text": text})
+                            "line": int(lineno) if lineno.isdigit() else None, "text": text, "commit": oid})
         elif a.mode == "path":
             results.append({"repo": repo, "ref": ref, "path": path})
         else:
             results.append({"repo": repo, "commit": path, "date": lineno, "subject": text})
-    results.sort(key=lambda r: (r.get("repo", ""), r.get("path", ""), r.get("line") or 0))
+    if a.mode == "message":
+        results.sort(key=lambda r: r.get("repo", ""))  # 稳定排序：保留 git log 的时间倒序
+    else:
+        results.sort(key=lambda r: (r.get("repo", ""), r.get("path", ""), r.get("line") or 0))
     payload = {
         "pattern": a.pattern,
         "mode": a.mode,
         "match_mode": "line_and_fallback" if stats.get("fallback_and") else ("regex" if a.regex else "literal"),
         "total": len(results),
         "truncated": len(results) > a.max or stats["capped"],
+        "capped": bool(stats["capped"]),
         "complete": not stats["errors"],
         "repos_scanned": stats["repos_total"] - stats["repos_failed"],
         "repos_failed": stats["repos_failed"],
@@ -546,9 +696,13 @@ def main():
     ap.add_argument("-j", "--jobs", type=int, default=8, help="并发仓数（默认 8）")
     ap.add_argument("--json", action="store_true", help="JSON 输出")
     ap.add_argument("--sync", action="store_true", help="搜索前先增量同步镜像")
+    ap.add_argument("--sync-only", dest="sync_only", action="store_true",
+                    help="只同步镜像与索引，不搜索（供 MCP sync_mirror 使用）")
     ap.add_argument("--repos", action="store_true", help="只列出镜像里的仓")
     a = ap.parse_args()
     a.mode = a.mode or "content"
+    if a.sync_only:
+        a.sync = True
     if a.query_alias and not a.pattern:
         a.pattern = a.query_alias
 
@@ -578,6 +732,8 @@ def main():
     if not effective["valid"]:
         die("CONFIG_ERROR: " + "; ".join(effective["errors"]))
 
+    sync_busy = False
+    sync_stdout = ""
     if a.sync:
         if len(OWNERS) != 1:
             die("CONFIG_ERROR: --sync currently supports exactly one owner; "
@@ -589,21 +745,53 @@ def main():
             # sync.sh does not read JSON or CLI options. Pass the resolved values,
             # rather than letting it fall back to another directory/owner.
             sync_env = dict(os.environ, GITEA_MIRROR_ROOT=ROOT, GITEA_OWNERS=OWNER)
-            sync_result = subprocess.run(
-                [bash_bin, SYNC, "-q"], check=False, env=sync_env,
-                stderr=subprocess.PIPE, text=True, errors="replace",
-            )
-            sync_stderr = sync_result.stderr or ""
+            capture_status = a.sync_only and a.json
+            sync_env["GITQ_SYNC_STATUS_STDOUT"] = "1" if capture_status else "0"
+            sync_rc, sync_stderr, sync_stdout = run_sync(
+                [bash_bin, SYNC, "-q"], sync_env, sync_timeout_seconds(), capture_status)
             if sync_stderr:
                 print(sync_stderr, end="" if sync_stderr.endswith("\n") else "\n", file=sys.stderr)
-            if sync_result.returncode != 0:
+            if sync_rc == SYNC_BUSY_RC:
+                # 另一轮同步正在进行：不重复启动，直接在当前镜像上检索（可能略旧）。
+                sync_busy = True
+                print("SYNC_BUSY: 另一轮同步正在进行，本次沿用当前镜像搜索（结果可能不是最新）", file=sys.stderr)
+            elif sync_rc == SYNC_TIMEOUT_RC:
+                die("SYNC_FAILED: 同步超时，已终止同步进程组", code=1)
+            elif sync_rc != 0:
                 index_failure = re.search(r"(?:^|\n)INDEX_UPDATE_FAILED:[^\n]*\brc=(\d+)\b", sync_stderr)
                 if index_failure:
                     die(f"INDEX_UPDATE_FAILED: 索引更新失败 rc={index_failure[1]}",
-                        code=sync_result.returncode or 1)
-                die(f"SYNC_FAILED: 同步脚本退出码 {sync_result.returncode}", code=sync_result.returncode or 1)
+                        code=sync_rc or 1)
+                die(f"SYNC_FAILED: 同步脚本退出码 {sync_rc}", code=sync_rc or 1)
+        except SystemExit:
+            raise
         except Exception as e:
             die(f"执行同步失败：{e}（Windows 环境建议通过 PowerShell 执行 scripts\\setup-windows.ps1 或 git 镜像拉取）")
+
+    if a.sync_only:
+        status = "busy" if sync_busy else "ok"
+        if a.json:
+            details = {}
+            if not sync_busy and parse_sync_status:
+                # Read this run's record while another sync may replace state/last_status.
+                prefix = "SYNC_STATUS_RECORD "
+                record = next((line[len(prefix):] for line in reversed(sync_stdout.splitlines())
+                               if line.startswith(prefix)), "")
+                details = parse_sync_status(record)
+            enum_source = details.get("enum_source")
+            degraded = details.get("degraded", False) or enum_source in ("cache", "disk")
+            print(json.dumps({
+                "status": "degraded" if degraded else status,
+                "owners": OWNERS,
+                "degraded": degraded,
+                "enum_source": enum_source,
+                "cache_stale": details.get("cache_stale", False),
+                "complete_repo_list": not sync_busy and not degraded and enum_source in ("api", "ssh"),
+                **{key: details.get(key) for key in ("ok", "fail", "total")},
+            }, ensure_ascii=False))
+        else:
+            print(f"sync {status}")
+        return
 
     if a.doctor:
         if not indexer:
@@ -637,8 +825,20 @@ def main():
             die("使用 --read 时必须通过 -r 指定仓库名")
         repo_id, gd = resolve_repo(a.repo[0])
         ref = a.branch or "HEAD"
+        if not valid_ref(ref):
+            die(f"INVALID_REF: ref 含非法字符或以 '-' 开头：{ref}")
         clean_rel_path = normalize_git_path(a.read_path)
-        p = subprocess.run(GN + [f"--git-dir={gd}", "show", f"{ref}:{clean_rel_path}"], capture_output=True, text=True)
+        rev = subprocess.run(
+            GN + [f"--git-dir={gd}", "rev-parse", "--verify", "--end-of-options", f"{ref}^{{}}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
+        if rev.returncode != 0 or not rev.stdout.strip():
+            die(rev.stderr.strip() or f"无法读取 {a.repo[0]}@{ref}:{a.read_path}", code=1)
+        oid = rev.stdout.strip()
+        p = subprocess.run(
+            GN + [f"--git-dir={gd}", "show", f"{oid}:{clean_rel_path}"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+        )
         if p.returncode != 0:
             die(p.stderr.strip() or f"无法读取 {a.repo[0]}@{ref}:{a.read_path}", code=1)
         sys.stdout.write(p.stdout)
@@ -648,7 +848,10 @@ def main():
         if not indexer:
             die("未找到 indexer 模块，无法构建索引")
         repo_filter = ",".join(a.repo) if a.repo else None
-        indexer.build_index(ROOT, OWNER, repo_filter=repo_filter, full=a.full, verbose=not a.json)
+        try:
+            indexer.build_index(ROOT, OWNER, repo_filter=repo_filter, full=a.full, verbose=not a.json)
+        except (indexer.IndexReadError, RuntimeError, ValueError) as exc:
+            die(str(exc), code=1)
         return
 
     if a.doc_mode:
@@ -673,7 +876,7 @@ def main():
                 print("REPO_NOT_IN_MIRROR: 镜像里没有匹配该 -r 的仓（--repos 查看镜像里有哪些仓）")
             sys.exit(0)
         repo_filter = ",".join(a.repo) if a.repo else None
-        res = indexer.search_fts(ROOT, a.pattern, repo=repo_filter, limit=a.max, kind=a.kind)
+        res = indexer.search_fts(ROOT, a.pattern, repo=repo_filter, limit=a.max, kind=a.kind, owners=OWNERS)
         if a.json:
             # JSON 模式下仍将含 error 的结构打到 stdout，但以 rc=1 退出：
             # MCP server.mjs 依赖 stdout JSON 解析 + 非零退出码双信号走 failureResult 归因（如 DEPENDENCY_MISSING）。
@@ -703,6 +906,12 @@ def main():
 
     if not a.pattern:
         ap.error("需要一个搜索模式（或 --repos）")
+
+    if a.regex and a.mode in ("path", "message"):
+        try:
+            re.compile(a.pattern, 0 if a.case_sensitive else re.I)
+        except re.error as e:
+            die(f"正则不合法：{e}")
 
     repos = pick_repos(a.repo)
     if not repos:

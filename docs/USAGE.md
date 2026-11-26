@@ -2,7 +2,7 @@
 
 > 新安装请先读 [`POST-INSTALL.md`](POST-INSTALL.md) 完成镜像、索引与 MCP 验收；能力边界见 [`BOUNDARIES.md`](BOUNDARIES.md)。
 
-> 本文聚焦于**如何高效使用**：四个核心工具的功能定位、入参规范、省上下文调用法则以及真实工作流场景。
+> 本文聚焦于**如何高效使用**：四个只读核心工具与一个同步工具的功能定位、入参规范、省上下文调用法则以及真实工作流场景。
 > 生产部署与高可用运维参见 [OPERATIONS.md](OPERATIONS.md)；MCP 工具名前缀机制解析参见 [TOOL-NAMING.md](TOOL-NAMING.md)。
 
 ---
@@ -14,7 +14,7 @@
 3. **分清检索范围**：`search_code` 覆盖镜像中的全部本地分支；FTS `search_docs` 只索引每仓默认分支。两者都只覆盖已经推送并完成镜像同步的内容。
 
 > 💡 **能力公开边界与向后兼容说明**：  
-> 本项目 `v2.x` 标准开源发布的公共契约包含 4 个中性核心基础工具（`search_code`、`search_docs`、`read_file`、`list_repositories`）。为保障 `v1.2.x` 老用户平滑升级，`tools/call` 同时兼容 `search_gitea*` 与 `search_gitorca*` 两族旧名（保留至 `v3.0.0` 前，调用时仅在 stderr 输出废弃告警）。若您所在的特定部署环境通过上层网关封装了混合召回（如各类 `*_hybrid` 向量融合工具），请以宿主实际注册的扩展工具清单为准。
+> 本项目 `v2.x` 标准开源发布的公共契约包含 4 个只读中性核心工具（`search_code`、`search_docs`、`read_file`、`list_repositories`）和 1 个显式同步工具 `sync_mirror`。为保障 `v1.2.x` 老用户平滑升级，`tools/call` 同时兼容 `search_gitea*` 与 `search_gitorca*` 两族旧名（保留至 `v3.0.0` 前，调用时仅在 stderr 输出废弃告警）。若您所在的特定部署环境通过上层网关封装了混合召回（如各类 `*_hybrid` 向量融合工具），请以宿主实际注册的扩展工具清单为准。
 
 ---
 
@@ -29,15 +29,16 @@
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `query` | string | **必填**。检索关键词或短语；当 `regex: true` 时按扩展正则表达式（egrep）解析 |
-| `mode` | string | 检索模式：`content`（默认，搜文件内容）/ `path`（搜文件名与路径）/ `message`（搜 commit 提交日志） |
-| `repo` | string | 限定仓库范围，支持逗号分隔与 `*` 通配符（如 `"acme/dsh-*"`） |
-| `branch` | string | 限定分支；省略时检索全部本地分支；`HEAD` 代表仅检索默认分支 |
+| `mode` | string | 检索模式：`content`（默认，搜文件内容）/ `path`（搜文件名与路径）/ `message`（搜 commit 提交日志；默认按字面量匹配，`fix(auth`、`[WIP` 等含括号的查询无需转义，`regex: true` 才按正则解释） |
+| `repo` | string | 限定仓库范围：`owner/repo` 按完整身份子串匹配；不含 `/` 的裸名按**仓名子串**匹配各 owner 的仓（`app` 命中 `myapp`）；含 `*` `?` 时按整名通配；逗号分隔多个（如 `"acme/dsh-*"`）。`search_docs` 使用同一套规则 |
+| `branch` | string | 限定分支（v2.0.3 起**精确匹配**，前缀/模糊请写 `main*`，逗号分隔多个）；省略时检索全部本地分支；`HEAD` 代表仅检索默认分支 |
 | `files_only` | boolean | **省上下文利器**。为 `true` 时仅返回匹配的文件名列表，不返回匹配行文本 |
 | `regex` | boolean | 是否开启正则表达式匹配（默认 `false`） |
 | `case_sensitive`| boolean | 是否区分大小写（默认 `false`） |
 | `max_results` | integer | 返回结果条数上限，**默认 5**（最大被系统硬夹至 200 条） |
-| `sync` | boolean | 搜索前先执行增量镜像同步并更新索引（写操作，默认 `false`；耗时取决于仓库规模、网络与变更量） |
 
+> **严格只读契约（v2.0.3）**：`search_code` 自 `v2.0.3` 起不再接受 `sync` 参数，永远不写镜像；旧版调用方仍传 `sync: true` 时不会报错，也不会执行同步，而是在结果中附带 `⚠️ SYNC_MOVED:` 提示。需要刷新镜像时请显式调用 `sync_mirror`（见 §2.5）。
+>
 > **智能降级机制**：在 `content` 模式下，当多词短语字面量匹配返回 0 命中时，引擎会自动回退为“同一行内多词 AND”模式，输入 `"caddy 证书"` 时无需手动拆分关键词。
 
 ---
@@ -49,14 +50,14 @@
 | 参数 | 类型 | 说明 |
 |---|---|---|
 | `query` | string | **必填**。自然语言关键词或短语（如 `"反向代理 502 证书配置"`） |
-| `repo` | string | 限定仓库名称（支持通配符，如 `"session*"`） |
+| `repo` | string | 限定仓库，规则与 `search_code` 完全一致（`owner/repo` 完整身份 / 裸名按仓名子串 / `*` `?` 整名通配 / 逗号分隔多个，如 `"session*"`） |
 | `kind` | string | 资产类型软分区，支持逗号分隔：`doc` / `session` / `config` / `script`。**省略则全库检索** |
 | `max_results` | integer | 返回匹配文档数上限，**默认 5** |
 
 **四类内容分区（`kind`）典型用途**：
 - `session`：检索导出的历次长会话记录，定位历史排障经验、技术决策背景与踩坑教训；
 - `doc`：检索技术手册、设计文档、README 与 Runbook；
-- `config`：检索 `*.yml`、`*.conf`、`*.env` 等配置文件；
+- `config`：检索 `*.yml`、`*.toml`、`*.conf`、`*.json` 等配置文件（被默认敏感路径护栏屏蔽的 `.env*`、凭据文件不会进入索引）；
 - `script`：检索 `*.sh`、`*.bash`、`*.service`、`*.timer`、`*.socket`；当前默认分类器把 `*.py` 归入 `code`，不会被 `kind: script` 命中。
 
 ---
@@ -69,10 +70,12 @@
 |---|---|---|
 | `repo` | string | **必填**。目标仓库名称，推荐 `owner/repo`（如 `"myorg/dsh-toolkit"`） |
 | `path` | string | **必填**。仓内相对路径（如 `"deploy/docker-compose.yml"`） |
-| `ref` | string | 分支名、Tag 或 Commit SHA；省略时取该仓默认分支 |
+| `ref` | string | 分支名、Tag 或 Commit SHA；省略时取该仓默认分支。必须是普通修订名：不得以 `-` 开头，不含 `:`、空白或控制字符，否则返回 `INVALID_REF` |
 | `offset` | integer | 起始行号（基于 0 开始，默认为 `0`） |
 | `limit` | integer | 返回行数。**默认 400 行**；若需获取全文可显式传 `0`（受单次字节上限约束） |
 
+> **文件大小与行号**：单个文件超过 `GITEA_MAX_BLOB_BYTES`（默认 32 MiB）返回 `FILE_TOO_LARGE`，不会读入内存；「共 N 行」不含结尾换行产生的空行；`offset` 超出末尾或文件为空时返回明确提示而不是空正文。
+>
 > **内置安全护栏**：单次读取受 `GITEA_MAX_READ_BYTES`（默认 60KB，兼容旧 `GITQ_MAX_READ_BYTES`）强约束，超出部分自动截断并附带状态标注。文件路径严格区分大小写，遇路径疑义可先通过 `search_code(mode: "path")` 探路。
 
 ---
@@ -86,6 +89,35 @@
 | `filter` | string | 仓库名称子串或通配符（如 `"acme/dsh-*"`）；省略则列出镜像库中所有仓库 |
 
 适用于资产梳理、确认新建仓库是否已被同步，或在模糊记忆下进行仓库名称定位。
+
+---
+
+### 2.5 `sync_mirror` —— 显式增量同步镜像与索引（`v2.0.3` 新增）
+
+调用底层 `gts --sync-only --json` 执行 `scripts/sync.sh` 增量镜像同步（`git remote update --prune`）并自动刷新 FTS5 索引。它是五个标准工具中**唯一会写镜像的工具**（MCP 注解 `readOnlyHint: false, destructiveHint: true, openWorldHint: true`），无兼容旧别名。
+
+| 参数 | 类型 | 说明 |
+|---|---|---|
+| *(无参数)* | object (`{}`) | 不接受任何入参；同步目标与超时由服务端生效的 `GITEA_MIRROR_ROOT`、`GITEA_OWNERS`、`GITEA_SYNC_TIMEOUT` 及宿主 MCP `env` 中的 `GITEA_URL` / `GITEA_TOKEN` / `GITEA_REMOTE` 决定 |
+
+> **使用约定与防降级提示**：仅在刚 `git push` 后必须立刻检索到新提交时显式调用一次，切勿放入循环。`config.json` 有意不读取 `gitea.url` / `gitea.token`；若希望 `sync_mirror` 完成全量 API 仓单枚举（避免触发 `⚠️ SYNC_DEGRADED` 回退到 `disk`/`cache`），请在宿主 MCP `env` 中传入 `GITEA_URL`（以及 `GITEA_TOKEN` 或配置 `<mirror_root>/.sync-token` / `GITEA_REMOTE`）。单次仅支持单个 owner；另一轮同步进行中会安全返回 `⚠️ SYNC_BUSY`。
+
+---
+
+### 2.6 结果头与错误提示速查
+
+| 提示 | 含义 | 建议动作 |
+|---|---|---|
+| `全库命中 ≥ N 条` | 某仓命中触顶（每仓上限 `max(500, max_results×5)` 行），N 是下界 | 缩小 query 或用 `repo` 限定 |
+| `PARTIAL_RESULT(GIT_SEARCH_FAILED)` | 部分仓搜索失败，但其余仓有命中；结果**不完整** | 不要据此断言其余仓零命中；按失败详情修复该仓后重试。零命中且有失败仍按 `GIT_SEARCH_FAILED` 报错 |
+| `SYNC_BUSY` | 调用 `sync_mirror` 时另一轮同步正在进行，本次未同步 | 结果基于当前镜像（可能略旧）；稍后重试或查看 `state/last_status` |
+| `SYNC_DEGRADED` | `sync_mirror` 更新了已知仓，但枚举降级为缓存/本地目录，未取得完整仓单 | 新创建的仓库可能暂未被发现；检查远端 API/SSH 连通性后再调用 `sync_mirror` |
+| `SYNC_MOVED` | 旧调用方向只读 `search_code` 传入了已移除的 `sync: true` 参数 | 本次未同步，仅基于当前镜像检索；需要刷新镜像请改调 `sync_mirror` |
+| `FILE_TOO_LARGE` | `read_file` 目标超过 `GITEA_MAX_BLOB_BYTES` | 用 `search_code` 定位片段；确需读取可调大该变量 |
+| `OUTPUT_TOO_LARGE` | 子进程输出超过 `GITEA_MAX_CHILD_OUTPUT_BYTES`，已终止 | 缩小 query、限定 `repo`、降低 `max_results` |
+| `INVALID_REF` | `read_file` 的 `ref` 含非法字符或以 `-` 开头 | 改用分支 / tag / commit 名 |
+| `CANCELLED` | 客户端取消了请求，子进程组已终止 | 无需处理 |
+| `INDEX_REBUILD_REQUIRED` | 索引是 `v1.2.2` 及更早的裸仓名格式 | 执行 `gts --reindex --full`（2.0.2 因中途失败遗留的索引会自动恢复，无需此步） |
 
 ---
 
@@ -169,7 +201,7 @@
 2. **按内容与分支分流**：中文/多词且目标在默认分支时，使用 `search_docs`；若可能位于非默认分支，使用 `search_code` 搜全部 heads，再按 `ref` 读取。
 3. **缩小关键词长度**：长句可能因标点或连字差异导致无法匹配，建议精简至 2~3 个核心技术名词。
 4. **验证仓库范围**：调用 `list_repositories` 确认目标仓库是否已被纳入同步清单。
-5. **按需触发镜像同步**：若目标是刚刚推送的提交，可在一次明确的调用中设置 `sync: true`。这会写入镜像并更新索引；不要在循环、并发 Agent 或每次查询中默认开启。
+5. **按需触发镜像同步**：若目标是刚刚推送的提交，先显式调用一次 `sync_mirror`，再检索。它会写入镜像并更新索引；不要在循环、并发 Agent 或每次查询前默认调用。`search_code` 自 2.0.3 起严格只读，不再接受 `sync` 参数（旧调用方传入时会被忽略并在结果里标注 `SYNC_MOVED`）。
 
 ---
 
@@ -216,7 +248,7 @@ bin/gts --reindex
 | `--doctor` / `--dsh-home` | 索引与宿主会话健康诊断 / 指定宿主 `.dsh` 目录 |
 | `--config` / `--mirror-root` / `--owners` / `--show-effective-config` | 显式配置覆盖与最终配置来源展示 |
 | `--read <path>` | 直接读取 `-r` 指定仓内的文件 |
-| `--sync` | 搜索前先增量同步镜像并更新索引（写操作，重操作） |
+| `--sync` / `--sync-only` | 搜索前先增量同步镜像并更新索引 / 仅同步并刷新索引（`--sync-only --json` 供 `sync_mirror` 消费，含 `degraded`/`enum_source`；写操作） |
 | `--repos` | 只列出镜像里的仓 |
 | `-n <N>` / `-j <N>` / `--json` | 最多输出行数（默认 200）/ 并发仓数（默认 8）/ JSON 输出 |
 

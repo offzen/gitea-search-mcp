@@ -18,7 +18,7 @@ $gts = if ($env:GITEA_SEARCH_CLI) { $env:GITEA_SEARCH_CLI } elseif ($env:GTS_BIN
 if (-not $gts) { $gts = Join-Path $RootDir 'bin\gts' }
 $env:GITEA_SEARCH_CLI = $gts
 $env:GTS_BIN = $gts
-Write-Output 'MCP bare tool names: search_code, search_docs, read_file, list_repositories'
+Write-Output 'MCP bare tool names: search_code, search_docs, read_file, list_repositories, sync_mirror'
 Write-Output 'Legacy tool aliases accepted on tools/call: search_gitea*, search_gitorca*'
 Write-Output 'Host naming example (not guaranteed): mcp__gitea-search__search_code'
 Write-Output "Checking standalone server; this does not verify host registration. Query=$Query"

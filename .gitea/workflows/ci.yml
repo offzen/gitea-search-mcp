@@ -2,7 +2,7 @@ name: gate2 Linux CI
 
 on:
   push:
-    branches: [main, 'v*', 'release/**', 'fix/**']
+    branches: [main, 'v*', 'release/**', 'fix/**', 'dev/**']
   pull_request:
     branches: [main, 'release/**']
   workflow_dispatch:

@@ -41,18 +41,29 @@ def _timestamp(root, name):
     return raw, None
 
 
+def parse_sync_status(raw):
+    fields = dict(re.findall(r"(?:^|\s)([a-z_]+)=([^\s]+)", raw))
+    return {
+        "degraded": fields.get("degraded") == "1",
+        "enum_source": fields.get("enum_source"),
+        "cache_stale": fields.get("cache_stale") == "1",
+        **{key: int(fields[key]) if re.fullmatch(r"[0-9]+", fields.get(key, "")) else None
+           for key in ("ok", "fail", "total")},
+        **{key: fields.get(key) for key in ("sync_scope", "sync_status", "index_status")},
+    }
+
+
 def read_sync_state(root):
     attempt, attempt_error = _timestamp(root, "last_sync")
     success, success_error = _timestamp(root, "state/last_ok")
     errors = [e for e in (attempt_error, success_error) if e]
     status = "unknown"
+    details = parse_sync_status("")
     try:
-        raw = (Path(root) / "state/last_status").read_text(encoding="utf-8")
-        fail = re.search(r"(?:^|\s)fail=(\d+)(?:\s|$)", raw)
-        index_status = re.search(r"(?:^|\s)index_status=(\w+)(?:\s|$)", raw)
-        if fail:
-            index_failed = index_status and index_status[1] == "failed"
-            status = "failed" if int(fail[1]) or index_failed else "success"
+        details = parse_sync_status((Path(root) / "state/last_status").read_text(encoding="utf-8"))
+        if details["fail"] is not None:
+            sync_failed = details["sync_status"] not in (None, "ok")
+            status = "failed" if details["fail"] or sync_failed or details["index_status"] == "failed" else "success"
         else:
             errors.append("state/last_status")
     except FileNotFoundError:
@@ -63,7 +74,7 @@ def read_sync_state(root):
         status = "invalid"
     elif not attempt and not success and status == "unknown":
         status = "unrecorded"
-    return {"status": status, "last_attempt": attempt, "last_success": success, "invalid_records": errors}
+    return {"status": status, "last_attempt": attempt, "last_success": success, "invalid_records": errors, **details}
 
 
 def sync_summary(state):

@@ -11,6 +11,7 @@ import argparse
 import contextlib
 import fnmatch
 import json
+import bisect
 import os
 import re
 import sqlite3
@@ -88,7 +89,7 @@ DEFAULT_EXTS = DOC_EXTS | CONFIG_EXTS
 
 MAX_FILE_BYTES = 500 * 1024  # 单文件最多索引前 500KB，防大文件打爆索引
 
-GN = ["git", "-c", "core.pager=cat", "-c", "color.ui=false", "-c", "core.quotePath=false"]
+GN = ["git", "--no-replace-objects", "-c", "core.pager=cat", "-c", "color.ui=false", "-c", "core.quotePath=false"]
 
 # FTS5 tokenizer 规格：unicode61 + remove_diacritics 2（去掉变音符，如 café→cafe）。
 # 用 chr 拼接规避外部对字面量 "unicode61" 的误改写，确保建表语句正确。
@@ -495,6 +496,7 @@ class IndexLock:
 
 
 INDEX_IDENTITY_VERSION = 2
+SENSITIVE_FILTER_VERSION = 1
 
 
 def _index_identity_version(conn):
@@ -512,6 +514,7 @@ def init_db(conn, identity_version=INDEX_IDENTITY_VERSION):
     with conn:
         conn.execute("PRAGMA journal_mode=WAL;")
         conn.execute("PRAGMA synchronous=NORMAL;")
+        conn.execute("CREATE TABLE IF NOT EXISTS index_meta (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("""
             CREATE TABLE IF NOT EXISTS file_blobs (
                 repo TEXT NOT NULL,
@@ -565,9 +568,31 @@ def init_db(conn, identity_version=INDEX_IDENTITY_VERSION):
             conn.execute(f"PRAGMA user_version={int(identity_version)}")
 
 
-def _require_current_index(conn):
+def _infer_owner_identity(conn):
+    """True when every indexed repo id is already ``owner/repo`` (identity v2 shape).
+
+    A v1 index stored bare repo names, so it can never satisfy this. An index written by a
+    build that was interrupted before ``user_version`` was stamped (the failure mode behind
+    the 2.0.2 "INDEX_REBUILD_REQUIRED after a partial first build" report) always does, so it
+    is safe to treat it as current instead of forcing a destructive ``--full`` rebuild.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT repo FROM doc_rowid UNION SELECT repo FROM file_blobs UNION SELECT repo FROM repo_heads"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return False
+    return bool(rows) and all("/" in (r[0] or "") for r in rows)
+
+
+def _require_current_index(conn, persist=False):
     version = _index_identity_version(conn)
     if version != INDEX_IDENTITY_VERSION and _index_has_documents(conn):
+        if _infer_owner_identity(conn):
+            if persist:
+                with conn:
+                    conn.execute(f"PRAGMA user_version={INDEX_IDENTITY_VERSION}")
+            return
         raise RuntimeError(
             f"INDEX_REBUILD_REQUIRED: 索引身份版本 {version or 1} 不含 owner；"
             "请执行全量重建后再搜索或增量更新：gts --reindex --full"
@@ -615,7 +640,7 @@ def get_head_ref_and_sha(gitdir):
     try:
         p = subprocess.run(
             GN + [f"--git-dir={gitdir}", "symbolic-ref", "--short", "HEAD"],
-            capture_output=True, text=True, check=True
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=True
         )
         head = p.stdout.strip()
         if head:
@@ -629,11 +654,112 @@ def get_head_ref_and_sha(gitdir):
         sha = get_head_commit_sha(gitdir, cand)
         if sha:
             return cand, sha
+    # HEAD 悬空（指向不存在的分支）但仓库里有别的分支：取字典序第一个本地分支，避免整仓被漏索引。
+    try:
+        p = subprocess.run(
+            GN + [f"--git-dir={gitdir}", "for-each-ref", "--count=1", "--sort=refname",
+                  "--format=%(refname:short)", "refs/heads/"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+        first = p.stdout.strip() if p.returncode == 0 else ""
+        if first:
+            sha = get_head_commit_sha(gitdir, first)
+            if sha:
+                return first, sha
+    except Exception:
+        pass
     return "HEAD", None
+
+
+def repo_has_any_refs(gitdir):
+    """True/False 表示仓库是否存在任何 ref；无法判断（git 失败）时抛 IndexReadError。
+
+    用于区分「刚创建、尚无提交的空仓库」（正常、应跳过）与「读取失败」（必须报错）。
+    """
+    try:
+        p = subprocess.run(
+            GN + [f"--git-dir={gitdir}", "for-each-ref", "--count=1", "--format=%(refname)"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace"
+        )
+    except Exception as exc:
+        raise IndexReadError(
+            f"INDEX_READ_FAILED: refs repo={os.path.basename(gitdir)} error={type(exc).__name__}"
+        ) from exc
+    if p.returncode != 0:
+        raise IndexReadError(
+            f"INDEX_READ_FAILED: refs repo={os.path.basename(gitdir)} rc={p.returncode}"
+        )
+    return bool(p.stdout.strip())
 
 
 class IndexReadError(RuntimeError):
     """A repository could not be read completely enough to update its index."""
+
+
+SENSITIVE_EXTS = {
+    ".pem", ".key", ".p12", ".pfx", ".jks", ".kdbx", ".ppk", ".ovpn", ".token",
+    ".tar", ".tgz", ".zip",
+}
+SAFE_TEMPLATE_SUFFIX_RE = re.compile(r"\.(?:example|sample|template|tpl|dist|schema\.json)$", re.I)
+SENSITIVE_BASENAME_RE = re.compile(
+    r"^(?:\.env(?:\..+)?|id_(?:rsa|ed25519|ecdsa|dsa)|\.(?:netrc|npmrc|pypirc|git-credentials|sync-token|admin-token|credentials\.ya?ml)|admin-credentials\.txt|infisical\.(?:json|token)|auth\.json|credentials\.json|service[-_]?account.*\.json|\.(?:pgpass|htpasswd|dockercfg)|kubeconfig|.*\.tfstate(?:\.backup)?)$",
+    re.I,
+)
+# 路径感知条目：basename 太泛（credentials / config / config.json），必须连同父目录一起判断。
+SENSITIVE_PATH_RE = re.compile(r"(?:^|/)(?:\.aws/credentials|\.docker/config\.json|\.kube/config)$", re.I)
+
+
+def _sensitive_paths_enabled():
+    flag = os.environ.get("GITEA_BLOCK_SENSITIVE_PATHS", "1").strip().lower()
+    return flag not in ("0", "false", "off", "no", "none")
+
+
+def is_sensitive_path(fpath):
+    """Return True if path matches credential/archive denylist (default on; opt-out via GITEA_BLOCK_SENSITIVE_PATHS=0)."""
+    if not _sensitive_paths_enabled():
+        return False
+    base = os.path.basename((fpath or "").replace("\\", "/"))
+    if not base:
+        return False
+    lower = base.lower()
+    ext = os.path.splitext(lower)[1]
+    if ext in SENSITIVE_EXTS or lower.endswith((".tar.gz", ".tar.bz2", ".tar.zst")):
+        return True
+    if SAFE_TEMPLATE_SUFFIX_RE.search(base):
+        return False
+    if SENSITIVE_PATH_RE.search((fpath or "").replace("\\", "/").lstrip("/")):
+        return True
+    return bool(SENSITIVE_BASENAME_RE.match(base))
+
+
+def _purge_sensitive_index_paths(conn):
+    key = "sensitive_filter_version"
+    version = str(SENSITIVE_FILTER_VERSION)
+    current = conn.execute("SELECT value FROM index_meta WHERE key=?", (key,)).fetchone()
+    with conn:
+        if not _sensitive_paths_enabled():
+            # A later enabled build must purge rows an opted-out build can add.
+            if current:
+                conn.execute("DELETE FROM index_meta WHERE key=?", (key,))
+            return 0
+        if current == (version,):
+            return 0
+        docs = [
+            (repo, ref, path, rowid)
+            for repo, ref, path, rowid in conn.execute("SELECT repo, ref, path, rowid FROM doc_rowid")
+            if is_sensitive_path(path)
+        ]
+        blobs = [
+            (repo, ref, path)
+            for repo, ref, path in conn.execute("SELECT repo, ref, path FROM file_blobs")
+            if is_sensitive_path(path)
+        ]
+        conn.executemany("DELETE FROM docs_fts WHERE rowid=?", ((rowid,) for _, _, _, rowid in docs))
+        conn.executemany("DELETE FROM doc_rowid WHERE repo=? AND ref=? AND path=?",
+                         ((repo, ref, path) for repo, ref, path, _ in docs))
+        conn.executemany("DELETE FROM file_blobs WHERE repo=? AND ref=? AND path=?", blobs)
+        conn.execute("INSERT OR REPLACE INTO index_meta (key, value) VALUES (?, ?)", (key, version))
+    return len(docs)
 
 
 def get_tree_entries(gitdir, ref, valid_exts):
@@ -670,6 +796,8 @@ def get_tree_entries(gitdir, ref, valid_exts):
         if parts[1] == b"blob":
             blob_sha = parts[2].decode("ascii")
             fpath = path_bytes.decode("utf-8", "replace")
+            if is_sensitive_path(fpath):
+                continue
             ext = os.path.splitext(fpath)[1].lower()
             if ext in valid_exts:
                 entries[fpath] = blob_sha
@@ -681,7 +809,7 @@ def get_head_commit_sha(gitdir, ref):
     try:
         p = subprocess.run(
             GN + [f"--git-dir={gitdir}", "rev-parse", "--verify", ref],
-            capture_output=True, text=True
+            capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
         if p.returncode == 0 and p.stdout.strip():
             return p.stdout.strip()
@@ -695,7 +823,7 @@ def get_head_commit_time(gitdir, ref):
     try:
         p = subprocess.run(
             GN + [f"--git-dir={gitdir}", "log", "-1", "--format=%ct", ref],
-            capture_output=True, text=True
+            capture_output=True, text=True, encoding="utf-8", errors="replace"
         )
         if p.returncode == 0 and p.stdout.strip():
             return int(p.stdout.strip())
@@ -813,6 +941,23 @@ def index_repo(conn, gitdir, repo_id, exts, verbose=False, force=False):
     repo = repo_id
 
     ref, head_commit = get_head_ref_and_sha(gitdir)
+
+    if head_commit is None:
+        # 没有任何可解析的默认分支：要么是「尚无提交的空仓库」（Forgejo 新建仓被 mirror 后的常态），
+        # 要么是读取失败。前者必须跳过而不是中止整轮索引（2.0.2 的 F1），后者仍然上报。
+        if repo_has_any_refs(gitdir):
+            raise IndexReadError(
+                f"INDEX_READ_FAILED: no resolvable branch repo={repo} (refs exist but HEAD/main/master "
+                f"and every local branch are unresolvable)"
+            )
+        # 零 ref ⇒ 仓库确实为空：清掉可能残留的旧索引行，其余照常。
+        had_rows = conn.execute("SELECT 1 FROM doc_rowid WHERE repo=? LIMIT 1", (repo,)).fetchone()
+        if had_rows:
+            _delete_indexed_repo(conn, repo)
+            conn.commit()
+        if verbose:
+            print(f"[{repo}] 空仓库（无任何 ref），已跳过索引")
+        return 0, 0, 0
 
     # 2026-10-22 加固：head_commit 变更门控
     # 若 commit sha 未改变且不是全量模式，直接跳过 ls-tree，将地板扫描耗时降低 10 倍
@@ -1095,8 +1240,59 @@ def _prune_vanished_repos(conn, mirror_root, owners, seen_repo_ids, verbose=Fals
     return pruned_repos, pruned_docs
 
 
+def _prune_excluded_repos(conn, owners, exclude_pats, verbose=False):
+    """GITEA_EXCLUDE_REPOS 是显式配置：已建索引的仓一旦命中排除清单，其旧行必须清掉
+    （不同于「枚举缺失」——那只是不可信证据，要等目录确实消失才 prune）。移除排除项后下一轮增量会重新纳入。"""
+    if not exclude_pats:
+        return 0, 0
+    owner_scope = set(owners)
+    indexed = {
+        row[0] for row in conn.execute(
+            "SELECT repo FROM doc_rowid UNION SELECT repo FROM file_blobs UNION SELECT repo FROM repo_heads"
+        )
+    }
+    pruned_repos = pruned_docs = 0
+    for repo_id in sorted(indexed):
+        owner, sep, _name = repo_id.partition("/")
+        if not sep or owner not in owner_scope or not _match_repo_any(repo_id, exclude_pats):
+            continue
+        pruned_docs += _delete_indexed_repo(conn, repo_id)
+        pruned_repos += 1
+        if verbose:
+            print(f"[{repo_id}] 已按 GITEA_EXCLUDE_REPOS 清理索引")
+    conn.commit()
+    return pruned_repos, pruned_docs
+
+
+def _remove_db_files(path, suffixes=("", "-wal", "-shm")):
+    for suffix in suffixes:
+        p = path + suffix
+        try:
+            if os.path.exists(p):
+                os.remove(p)
+        except OSError:
+            pass
+
+
+def _existing_index_is_usable(path):
+    """旧库是否仍可正常读取（版本为当前 identity，或为空库）。"""
+    if not os.path.exists(path):
+        return False
+    try:
+        probe = sqlite3.connect(path)
+    except sqlite3.Error:
+        return False
+    try:
+        _require_current_index(probe)
+        return _index_has_documents(probe)
+    except Exception:
+        return False
+    finally:
+        probe.close()
+
+
 def build_index(mirror_root, owners=None, repo_filter=None, exts=DEFAULT_EXTS, full=False,
-                verbose=True, allow_global_prune=True):
+                verbose=True, allow_global_prune=True, skip_repos=None):
     # 缺 jieba 时默认 fail-closed：若无分词直接建库，中文会被当作整段连续字符写入 FTS5，
     # 且 repo_heads 仍会记录最新 commit sha，后续即使补装 jieba 增量索引也会因 sha 未变而跳过，
     # 造成持久化“伪空索引”。仅当显式设 GITEA_ALLOW_NO_JIEBA=1（兼容旧变量 GITQ_ALLOW_NO_JIEBA=1）时才允许降级建英文索引。
@@ -1107,140 +1303,358 @@ def build_index(mirror_root, owners=None, repo_filter=None, exts=DEFAULT_EXTS, f
         )
 
     db_path = get_db_path(mirror_root)
-    
+
     with IndexLock(mirror_root):
-        if full and allow_global_prune and not repo_filter:
-            for suffix in ("", "-wal", "-shm"):
-                p = db_path + suffix
-                if os.path.exists(p):
-                    os.remove(p)
+        # 2.0.3：全量重建先写旁路库 gitea-fts.sqlite.new，成功后原子替换；
+        # 中途失败/被杀时旧库原样保留、搜索不中断（旧实现先删库再重建）。
+        atomic_full = bool(full and allow_global_prune and not repo_filter and not skip_repos)
+        work_path = db_path + ".new" if atomic_full else db_path
+        if atomic_full:
+            _remove_db_files(work_path)
 
-        conn = sqlite3.connect(db_path)
-        # identity-v1 行已经丢失 owner，不能猜迁移。只有 --full 可删除旧库后建立 v2。
-        init_db(conn, identity_version=None)
+        conn = sqlite3.connect(work_path)
         try:
-            _require_current_index(conn)
-        except Exception:
-            # On Windows an open sqlite3.Connection keeps the database file locked.
-            # The caller must be able to follow a rejected incremental build with
-            # the required full rebuild in the same process.
-            conn.close()
+            return _build_index_locked(
+                conn, work_path, db_path, atomic_full, mirror_root, owners, repo_filter,
+                exts, full, verbose, allow_global_prune, skip_repos=skip_repos,
+            )
+        except BaseException:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            if atomic_full:
+                _remove_db_files(work_path)
             raise
-        # identity v2 is marked only after the complete build succeeds. A failed
-        # first/full build therefore stays unreadable instead of exposing partial data.
 
-        # 旧库升级与一致性自愈：一次性为 docs_fts 补建 rowid 映射，并清理可能存在的历史重复行/孤儿行
-        n_map = conn.execute("SELECT COUNT(*) FROM doc_rowid").fetchone()[0]
-        n_docs = conn.execute("SELECT COUNT(*) FROM docs_fts").fetchone()[0]
-        if (n_map == 0 and n_docs > 0) or (n_map != n_docs):
-            rows = conn.execute("SELECT rowid, repo, ref, path FROM docs_fts ORDER BY rowid ASC").fetchall()
-            latest = {}
-            dup_rowids = []
-            for r_id, r_repo, r_ref, r_path in rows:
-                key = (r_repo, r_ref, r_path)
-                if key in latest:
-                    dup_rowids.append(latest[key])
-                latest[key] = r_id
-            with conn:
-                for d_id in dup_rowids:
-                    conn.execute("DELETE FROM docs_fts WHERE rowid=?", (d_id,))
-                conn.execute("DELETE FROM doc_rowid")
-                conn.executemany(
-                    "INSERT INTO doc_rowid(repo, ref, path, rowid) VALUES (?, ?, ?, ?)",
-                    [(k[0], k[1], k[2], v) for k, v in latest.items()],
-                )
-            if verbose:
-                print(f"[migrate] 已同步 {len(latest)} 篇文档的 rowid 映射（清理重复行 {len(dup_rowids)} 条）")
 
-        if not owners:
-            owners = get_configured_owners()
-        elif isinstance(owners, str):
-            owners = [o.strip() for o in owners.split(",") if o.strip()]
-        if not owners:
-            raise ValueError("CONFIG_ERROR: owners are not configured")
+def _build_index_locked(conn, work_path, db_path, atomic_full, mirror_root, owners, repo_filter,
+                        exts, full, verbose, allow_global_prune, skip_repos=None):
+    # identity-v1 行已经丢失 owner，不能猜迁移。只有 --full 可替换旧库后建立 v2。
+    init_db(conn, identity_version=None)
+    try:
+        # persist=True：由 2.0.2 中途失败留下的「全部是 owner/repo 形态但 user_version 未写」的库自愈为 v2。
+        _require_current_index(conn, persist=True)
+    except Exception:
+        # On Windows an open sqlite3.Connection keeps the database file locked.
+        # The caller must be able to follow a rejected incremental build with
+        # the required full rebuild in the same process.
+        conn.close()
+        raise
 
-        t0 = time.time()
-        op_name = "index_build" if full else "index_incremental"
-        total_mod = 0
-        total_del = 0
-        total_same = 0
-        total_repos_scanned = 0
-        prune_trusted = bool(allow_global_prune) and not repo_filter
-        seen_repo_ids = set()
-
-        with IoTracker(op_name) as tracker:
-            for owner in owners:
-                mirror_dir = os.path.join(mirror_root, owner)
-                if not os.path.isdir(mirror_dir):
-                    prune_trusted = False
-                    continue
-                try:
-                    all_r = list_repos(mirror_dir)
-                except Exception:
-                    conn.close()
-                    raise
-                seen_repo_ids.update(f"{owner}/{r}" for r in all_r)
-                if repo_filter:
-                    pats = [p for p in repo_filter.split(",") if p.strip()]
-                    repos = [r for r in all_r if _match_repo_any(f"{owner}/{r}", pats)]
-                else:
-                    repos = all_r
-
-                total_repos_scanned += len(repos)
-                for r in repos:
-                    repo_id = f"{owner}/{r}"
-                    gitdir = os.path.join(mirror_dir, r + ".git")
-                    try:
-                        mod, dele, same = index_repo(
-                            conn, gitdir, repo_id, exts, verbose=verbose, force=full
-                        )
-                    except Exception:
-                        conn.close()
-                        raise
-                    total_mod += mod
-                    total_del += dele
-                    total_same += same
-
-            if prune_trusted:
-                try:
-                    _prune_vanished_repos(
-                        conn, mirror_root, owners, seen_repo_ids, verbose=verbose
-                    )
-                except Exception:
-                    conn.close()
-                    raise
-
-        dur = time.time() - t0
-        judgment = evaluate_perf_budget(
-            op_name,
-            tracker.metrics,
-            {
-                "repos": total_repos_scanned,
-                "updated": total_mod,
-                "deleted": total_del,
-                "unchanged": total_same,
-                "full": bool(full),
-            },
-        )
-        record_perf_event(mirror_root, judgment, quiet=not verbose)
+    # 旧库升级与一致性自愈：一次性为 docs_fts 补建 rowid 映射，并清理可能存在的历史重复行/孤儿行
+    n_map = conn.execute("SELECT COUNT(*) FROM doc_rowid").fetchone()[0]
+    n_docs = conn.execute("SELECT COUNT(*) FROM docs_fts").fetchone()[0]
+    if (n_map == 0 and n_docs > 0) or (n_map != n_docs):
+        rows = conn.execute("SELECT rowid, repo, ref, path FROM docs_fts ORDER BY rowid ASC").fetchall()
+        latest = {}
+        dup_rowids = []
+        for r_id, r_repo, r_ref, r_path in rows:
+            key = (r_repo, r_ref, r_path)
+            if key in latest:
+                dup_rowids.append(latest[key])
+            latest[key] = r_id
+        with conn:
+            for d_id in dup_rowids:
+                conn.execute("DELETE FROM docs_fts WHERE rowid=?", (d_id,))
+            conn.execute("DELETE FROM doc_rowid")
+            conn.executemany(
+                "INSERT INTO doc_rowid(repo, ref, path, rowid) VALUES (?, ?, ?, ?)",
+                [(k[0], k[1], k[2], v) for k, v in latest.items()],
+            )
         if verbose:
-            m = judgment["metrics"]
-            print(
-                f"索引完成: 扫描 {total_repos_scanned} 仓 | 更新/新增 {total_mod} 篇 | 删除 {total_del} 篇 | "
-                f"未变 {total_same} 篇 | 耗时 {dur:.2f}s (cpu={m.get('cpu_ms', 0):.1f}ms, "
-                f"rchar={m.get('rchar', 0)}, write={m.get('write_bytes', 0)}, status={judgment['status']})"
+            print(f"[migrate] 已同步 {len(latest)} 篇文档的 rowid 映射（清理重复行 {len(dup_rowids)} 条）")
+
+    if not owners:
+        owners = get_configured_owners()
+    elif isinstance(owners, str):
+        owners = [o.strip() for o in owners.split(",") if o.strip()]
+    if not owners:
+        raise ValueError("CONFIG_ERROR: owners are not configured")
+
+    t0 = time.time()
+    op_name = "index_build" if full else "index_incremental"
+    total_mod = 0
+    total_del = _purge_sensitive_index_paths(conn)
+    total_same = 0
+    total_repos_scanned = 0
+    prune_trusted = bool(allow_global_prune) and not repo_filter and not skip_repos
+    seen_repo_ids = set()
+    failures = []
+    missing_owners = []
+    skip_set = set()
+    if skip_repos:
+        if isinstance(skip_repos, str):
+            skip_set = {s.strip() for s in skip_repos.split(",") if s.strip()}
+        else:
+            skip_set = {str(s).strip() for s in skip_repos if str(s).strip()}
+    exclude_raw = os.environ.get("GITEA_EXCLUDE_REPOS", "").strip()
+    exclude_pats = [p.strip() for p in exclude_raw.split(",") if p.strip()] if exclude_raw else []
+
+    with IoTracker(op_name) as tracker:
+        for owner in owners:
+            mirror_dir = os.path.join(mirror_root, owner)
+            if not os.path.isdir(mirror_dir):
+                prune_trusted = False
+                missing_owners.append(owner)
+                continue
+            all_r = list_repos(mirror_dir)
+            if exclude_pats:
+                all_r = [r for r in all_r if not _match_repo_any(f"{owner}/{r}", exclude_pats)]
+            seen_repo_ids.update(f"{owner}/{r}" for r in all_r)
+            if repo_filter:
+                pats = [p for p in repo_filter.split(",") if p.strip()]
+                repos = [r for r in all_r if _match_repo_any(f"{owner}/{r}", pats)]
+            else:
+                repos = all_r
+            if skip_set:
+                repos = [r for r in repos if f"{owner}/{r}" not in skip_set and r not in skip_set]
+
+            total_repos_scanned += len(repos)
+            for r in repos:
+                repo_id = f"{owner}/{r}"
+                gitdir = os.path.join(mirror_dir, r + ".git")
+                try:
+                    mod, dele, same = index_repo(
+                        conn, gitdir, repo_id, exts, verbose=verbose, force=full
+                    )
+                except IndexReadError as exc:
+                    # 2.0.3：单仓读取失败只隔离该仓，其余仓继续索引；整轮结束后统一以非零状态上报。
+                    failures.append(f"{repo_id}: {exc}")
+                    continue
+                total_mod += mod
+                total_del += dele
+                total_same += same
+
+        # 显式排除清单：与枚举缺失不同，命中即清理既有行（不受 failures / prune_trusted 影响）。
+        _prune_excluded_repos(conn, owners, exclude_pats, verbose=verbose)
+
+        # 有失败仓时不做全局 prune：失败不是「仓库已被删除」的证据。
+        if prune_trusted and not failures:
+            _prune_vanished_repos(
+                conn, mirror_root, owners, seen_repo_ids, verbose=verbose
             )
 
-        with conn:
-            conn.execute(f"PRAGMA user_version={INDEX_IDENTITY_VERSION}")
+    dur = time.time() - t0
+    judgment = evaluate_perf_budget(
+        op_name,
+        tracker.metrics,
+        {
+            "repos": total_repos_scanned,
+            "updated": total_mod,
+            "deleted": total_del,
+            "unchanged": total_same,
+            "failed": len(failures),
+            "full": bool(full),
+        },
+    )
+    record_perf_event(mirror_root, judgment, quiet=not verbose)
+    if verbose:
+        m = judgment["metrics"]
+        print(
+            f"索引完成: 扫描 {total_repos_scanned} 仓 | 更新/新增 {total_mod} 篇 | 删除 {total_del} 篇 | "
+            f"未变 {total_same} 篇 | 失败 {len(failures)} 仓 | 耗时 {dur:.2f}s (cpu={m.get('cpu_ms', 0):.1f}ms, "
+            f"rchar={m.get('rchar', 0)}, write={m.get('write_bytes', 0)}, status={judgment['status']})"
+        )
+
+    # 索引内的 repo id 一律是 owner/repo，部分失败也可安全盖章；盖章后增量构建与搜索不再被
+    # 「用户未完成的上一轮构建」卡死（2.0.2 的 F2）。
+    with conn:
+        conn.execute(f"PRAGMA user_version={INDEX_IDENTITY_VERSION}")
+
+    if atomic_full:
+        with contextlib.suppress(sqlite3.Error):
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
         conn.close()
-        return total_mod, total_del, total_same
+        if missing_owners:
+            # 审计 #3：配置的 owner 目录缺失（挂载暂不可用等）= 输入不完整，候选库缺这些 owner 的行，
+            # 绝不能替换旧库（哪怕全部缺失）；丢弃候选并显式报告，目录恢复后重试即可。
+            _remove_db_files(work_path)
+            raise IndexReadError(
+                "INDEX_INPUT_INCOMPLETE: 配置的 owner 镜像目录不存在，已放弃全量重建并保留现有索引: "
+                + ", ".join(missing_owners)
+            )
+        if failures and _existing_index_is_usable(db_path):
+            # 全量重建有失败仓，而旧库仍健康：保留旧库，丢弃不完整的新库。
+            _remove_db_files(work_path)
+        else:
+            # 旧库的 -wal/-shm 不能与新库文件混用，先清理再原子替换。
+            _remove_db_files(db_path, ("-wal", "-shm"))
+            os.replace(work_path, db_path)
+            _remove_db_files(work_path, ("-wal", "-shm"))
+    else:
+        conn.close()
+
+    if failures:
+        raise IndexReadError(
+            f"INDEX_READ_FAILED: {len(failures)} 个仓索引失败（其余仓已正常处理）: "
+            + "; ".join(failures[:5]) + (" ..." if len(failures) > 5 else "")
+        )
+    return total_mod, total_del, total_same
+
+
+_PEM_BEGIN_RE = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+_PEM_END_RE = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+_PEM_BODY_LINE_RE = re.compile(r"[A-Za-z0-9+/]+={0,2}")
+_PEM_HEADER_LINE_RE = re.compile(r"^(?:Proc-Type|DEK-Info|Comment|Version|Hash|Charset)\s*:", re.I | re.ASCII)
+_PEM_ASSIGNMENT_RE = re.compile(r"""^(?:(?:const|let|var)\s+)?[A-Za-z0-9_.]+\s*(?:\+?=|\()\s*(['"\x60])(.+?)\1\s*\)?$""", re.ASCII)
+_LINE_RE = re.compile(r"[^\n]*\n?")
+# Match JavaScript String.trim() at line edges.
+_PEM_WHITESPACE = (
+    " \t\r\n\f\v\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005"
+    "\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+def _unwrap_pem_line(line):
+    s = (line or "").strip(_PEM_WHITESPACE)
+    if not s or re.match(r"^#{2,}\s", s, flags=re.ASCII):
+        return s
+    s = re.sub(r"^(?:(?://|/\*|#|\*|--|;|>|-\s+)\s*)+", "", s, flags=re.ASCII)
+    if s.endswith((",", ";", "+", "\\", "*/")):
+        s = re.sub(r"(?:\*/|[,;+\\])+$", "", s).rstrip(_PEM_WHITESPACE)
+    quoted = re.fullmatch(r"""(['"\x60])(.*)\1""", s) or _PEM_ASSIGNMENT_RE.fullmatch(s)
+    if quoted:
+        s = re.sub(r"(?:\\r)?\\n$", "", quoted[2])
+    else:
+        s = re.sub(r"^['\"`]", "", s)
+        s = re.sub(r"(?:\\r)?\\n['\"`]?$", "", s)
+        s = re.sub(r"['\"`]$", "", s)
+    return s.strip(_PEM_WHITESPACE)
+
+
+# Keep the continuation grammar in sync with lib/security.mjs.
+def _looks_like_pem_base64(tok, has_context, bare=False):
+    if re.fullmatch(r"=[A-Za-z0-9+/]{4}", tok):
+        return True
+    if not _PEM_BODY_LINE_RE.fullmatch(tok):
+        return False
+    if tok.endswith("=") and len(tok) >= 4:
+        return True
+    if bare and len(tok) >= 16:
+        return True
+    if len(tok) < 16 and (not has_context or len(tok) < 4 or len(tok) % 4 != 0):
+        return False
+    if re.fullmatch(r"[0-9a-f]+|[A-Z]?[a-z]+", tok):
+        return False
+    if "+" in tok:
+        return True
+    has_u = bool(re.search(r"[A-Z]", tok))
+    has_l = bool(re.search(r"[a-z]", tok))
+    has_d = bool(re.search(r"[0-9]", tok))
+    if has_u and has_l and (has_d or "/" in tok):
+        return True
+    if has_u and re.fullmatch(r"[A-Z0-9]+", tok):
+        return True
+    return (len(tok) < 16 or len(tok) >= 24) and has_u and has_l
+
+
+def _is_pem_continuation(trimmed, has_context):
+    if _looks_like_pem_base64(trimmed, has_context, bare=True):
+        return True
+    unwrapped = _unwrap_pem_line(trimmed)
+    return bool(_PEM_HEADER_LINE_RE.match(unwrapped)) or _looks_like_pem_base64(unwrapped, has_context)
+
+
+def _redact_secrets_enabled():
+    return os.environ.get("GITEA_REDACT_SECRETS", "").strip().lower() not in (
+        "0", "false", "off", "no", "none"
+    )
+
+
+def _load_legacy_blob_for_snippet(mirror_root, repo, ref, path_str, blob_sha=None):
+    """Read the exact indexed blob so snippet masking has full-file context."""
+    if not mirror_root or not repo or "/" not in repo:
+        return None
+    if not isinstance(blob_sha, str) or not re.fullmatch(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})", blob_sha):
+        return None
+    owner, _, name = repo.partition("/")
+    if not owner or not name or "/" in name or owner in (".", "..") or name in (".", ".."):
+        return None
+    gitdir = os.path.join(mirror_root, owner, name + ".git")
+    if not os.path.isdir(gitdir):
+        return None
+    try:
+        max_blob = int(os.environ.get("GITEA_MAX_BLOB_BYTES", "") or (32 * 1024 * 1024))
+    except ValueError:
+        max_blob = 32 * 1024 * 1024
+    if max_blob <= 0:
+        max_blob = 32 * 1024 * 1024
+    try:
+        cmd = ["git", "--no-replace-objects", f"--git-dir={gitdir}", "cat-file"]
+        kind = subprocess.run(
+            cmd + ["-t", blob_sha], capture_output=True, timeout=10,
+        )
+        if kind.returncode != 0 or kind.stdout.strip() != b"blob":
+            return None
+        sz = subprocess.run(
+            cmd + ["-s", blob_sha], capture_output=True, timeout=10,
+        )
+        if sz.returncode != 0:
+            return None
+        size = int(sz.stdout.strip())
+        if size < 0 or size > max_blob:
+            return None
+        blob = subprocess.run(
+            cmd + ["blob", blob_sha], capture_output=True, timeout=15,
+        )
+        if blob.returncode != 0 or len(blob.stdout) != size:
+            return None
+        return blob.stdout.decode("utf-8", errors="replace")
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        return None
+
+
+def _mask_private_key_blocks(raw):
+    """在整篇原文上遮蔽私钥块（BEGIN..END；无 END 时遮到首个非 PEM 正文行为止），
+    必须先于截窗口/截摘要，否则窗口只含块的中段时规则无从匹配。遵守 GITEA_REDACT_SECRETS 开关。
+
+    2.0.3 N1：全部 END 位置只收集一次并用二分定位，整体 O(n)
+    （旧实现对每个无 END 的 BEGIN 都重新向后搜到文末并复制剩余字符串，N 个 BEGIN ⇒ O(n²)）。"""
+    if not _redact_secrets_enabled():
+        return raw
+    if not raw or "PRIVATE KEY" not in raw:
+        return raw
+    end_spans = [(m.start(), m.end()) for m in _PEM_END_RE.finditer(raw)]
+    end_starts = [a for a, _ in end_spans]
+    out = []
+    pos = 0
+    for m in _PEM_BEGIN_RE.finditer(raw):
+        if m.start() < pos:
+            continue
+        idx = bisect.bisect_left(end_starts, m.end())
+        start = m.start()
+        if idx < len(end_spans):
+            end = end_spans[idx][1]
+        else:
+            line_start = raw.rfind("\n", pos, start)
+            start = pos if line_start == -1 else line_start + 1
+            line_end = raw.find("\n", m.end())
+            end = len(raw) if line_end == -1 else line_end + 1
+            has_context = False
+            for line_m in _LINE_RE.finditer(raw, end):
+                if not line_m.group(0):
+                    break
+                line = line_m.group(0).strip(_PEM_WHITESPACE)
+                if line and not _is_pem_continuation(line, has_context):
+                    break
+                if line:
+                    has_context = True
+                end = line_m.end()
+        out.append(raw[pos:start])
+        out.append("[SECRET_REDACTED:private_key]")
+        if idx == len(end_spans) and raw[end - 1] == "\n":
+            out.append("\n")
+        pos = end
+    out.append(raw[pos:])
+    return "".join(out)
 
 
 def make_snippet(raw, tokens, width=120):
     """从原文截取命中词附近的片段并加【】高亮（替代 FTS snippet，避免分词空格影响可读性）。"""
     if not raw:
         return ""
+    raw = _mask_private_key_blocks(raw)
     text = re.sub(r'[\r\n]+', ' ', raw)
     low = text.lower()
     pos = -1
@@ -1264,7 +1678,19 @@ def make_snippet(raw, tokens, width=120):
     return ("..." if start > 0 else "") + seg.strip() + ("..." if end < len(text) else "")
 
 
-def search_fts(mirror_root, query, repo=None, limit=20, kind=None):
+def _perf_search_context(raw_query, hits, repo, kind):
+    """性能事件的上下文只记长度与聚合维度；原始查询/仓过滤文本可能含私有标识，仅在显式设
+    GITEA_AUDIT_INCLUDE_QUERY=1（与 Node 审计日志同一开关）时才记录截断原文。"""
+    ctx = {"query_len": len(raw_query), "hits": hits, "repo_filtered": bool(repo), "kind": kind or ""}
+    if os.environ.get("GITEA_AUDIT_INCLUDE_QUERY", "").strip().lower() in ("1", "true", "on", "yes"):
+        ctx["query"] = raw_query[:64]
+        ctx["repo"] = repo or ""
+    return ctx
+
+
+def search_fts(mirror_root, query, repo=None, limit=20, kind=None, owners=None):
+    """owners：当前宿主有效的 owner 集合。共享 mirror_root 的索引可能含其它 owner 的行，
+    传入后查询必须与该集合取交集（与可选 repo 过滤叠加）；None 保持旧行为（不限 owner，仅供直接库调用）。"""
     db_path = get_db_path(mirror_root)
     if not os.path.exists(db_path):
         return {"total": 0, "results": [], "error": "索引尚未建立，请先执行 indexer.py 进行索引。"}
@@ -1339,27 +1765,35 @@ def search_fts(mirror_root, query, repo=None, limit=20, kind=None):
         WHERE docs_fts MATCH ?
     """ % (sel_snip, sel_kind, sel_mtime)
     params = [clean_query]
+    owner_scope = None
+    if owners is not None:
+        if isinstance(owners, str):
+            owners = [o.strip() for o in owners.split(",") if o.strip()]
+        owner_scope = sorted({str(o) for o in owners if str(o)})
+        if not owner_scope:
+            sql += " AND 0"
+        else:
+            # 2.0.3 审计 #1：共享索引库不得返回已移出本宿主 owner 范围的行（owner 前缀精确比较，避免 LIKE 通配）。
+            clauses = []
+            for o in owner_scope:
+                clauses.append("substr(docs_fts.repo, 1, %d) = ?" % (len(o) + 1))
+                params.append(o + "/")
+            sql += " AND (%s)" % " OR ".join(clauses)
     if repo:
         repo_pats = [_normalize_repo_pattern(p) for p in str(repo).split(",") if _normalize_repo_pattern(p)]
         if repo_pats:
-            like_clauses = []
-            for rp in repo_pats:
-                # 完整 owner/repo 匹配完整身份；旧裸名只匹配 basename（最后一个 / 之后）。
-                # 仅显式 * / ? 是 glob；仓名中的字面 % / _ 必须转义，不能成为 SQL wildcard。
-                sql_pat = _repo_pattern_to_sql_like(rp)
-                if "/" in rp:
-                    if not sql_pat.startswith("%"):
-                        sql_pat = "%" + sql_pat
-                    if not sql_pat.endswith("%"):
-                        sql_pat = sql_pat + "%"
-                    like_clauses.append("docs_fts.repo LIKE ? ESCAPE '\\'")
-                else:
-                    sql_pat = "%/" + sql_pat + "%"
-                    like_clauses.append("docs_fts.repo LIKE ? ESCAPE '\\'")
-                while "%%" in sql_pat:
-                    sql_pat = sql_pat.replace("%%", "%")
-                params.append(sql_pat)
-            sql += " AND (" + " OR ".join(like_clauses) + ")"
+            # 2.0.3：仓库过滤与 `gts --repos` / `--reindex -r` / git 搜索统一使用 _match_repo_any
+            # （owner/repo 匹配完整身份；裸名按 basename 子串；含 * ? [ 时按 fnmatch 整名匹配）。
+            # 旧实现在 SQL 里用 LIKE '%/pat%'，裸名退化成「仓名前缀」，会静默漏掉 myapp 之类的仓。
+            known = [r[0] for r in cursor.execute("SELECT DISTINCT repo FROM doc_rowid")]
+            if owner_scope is not None:
+                known = [r for r in known if r.partition("/")[0] in owner_scope]
+            matched = sorted(r for r in known if _match_repo_any(r, repo_pats))
+            if matched:
+                sql += " AND docs_fts.repo IN (%s)" % ",".join("?" * len(matched))
+                params.extend(matched)
+            else:
+                sql += " AND 0"
     if kind:
         # kind 支持逗号分隔多值，如 kind='doc,config'；旧库无该列时忽略过滤（不报错）
         kinds = [k.strip() for k in str(kind).split(',') if k.strip()]
@@ -1405,13 +1839,24 @@ def search_fts(mirror_root, query, repo=None, limit=20, kind=None):
             # 只需在既有 candidate window 内确认存在下一条唯一结果；不改变 legacy total/page。
             has_more_seen = True
             break
+        if has_body_raw:
+            rendered_snippet = make_snippet(snip, q_tokens)
+        elif not _redact_secrets_enabled():
+            rendered_snippet = re.sub(r'[\r\n]+', ' ', snip or "").strip()
+        else:
+            # 审计 #5：旧版 FTS 库无 body_raw 列时，SQLite snippet() 缺少多行私钥完整上下文；
+            # 尝试从本地裸镜像读取完整文件并按整块脱敏后生成摘要，若无法验证则 fail-closed 省略摘要。
+            legacy_raw = _load_legacy_blob_for_snippet(mirror_root, r, ref, p, blob_sha)
+            if legacy_raw is not None:
+                rendered_snippet = make_snippet(legacy_raw, q_tokens)
+            else:
+                rendered_snippet = "[SNIPPET_OMITTED:legacy_index_unverified]"
         results.append({
             "repo": r,
             "ref": ref,
             "path": p,
             "title": title,
-            "snippet": (make_snippet(snip, q_tokens) if has_body_raw
-                        else re.sub(r'[\r\n]+', ' ', snip or "").strip()),
+            "snippet": rendered_snippet,
             "score": round(rank, 4),
             "kind": kind_v,
             "is_backup": bool(is_backup),
@@ -1421,7 +1866,7 @@ def search_fts(mirror_root, query, repo=None, limit=20, kind=None):
     judgment = evaluate_perf_budget(
         "fts_search",
         tracker.metrics,
-        {"query": raw_query[:64], "hits": len(results), "repo": repo or "", "kind": kind or ""},
+        _perf_search_context(raw_query, len(results), repo, kind),
     )
     record_perf_event(mirror_root, judgment)
     candidate_window_saturated = len(rows) >= fetch_n
@@ -1759,6 +2204,10 @@ def main():
         "--no-global-prune", action="store_true",
         help="本轮枚举不完整或仅同步部分仓时，禁止清理未见仓库",
     )
+    parser.add_argument(
+        "--skip-repos", default=None,
+        help="逗号分隔的本轮同步/校验失败仓（owner/repo 或裸名），跳过索引并保留其旧索引行",
+    )
     parser.add_argument("--stats", action="store_true", help="查看索引库状态统计")
     parser.add_argument("--perf-stats", action="store_true", help="查看性能与磁盘 I/O 监测统计")
     parser.add_argument("--doctor", action="store_true", help="运行索引与宿主 DSH 会话健康及 I/O 诊断")
@@ -1806,7 +2255,8 @@ def main():
         return
 
     if args.query:
-        res = search_fts(mirror_root, args.query, repo=args.repo, limit=args.limit, kind=args.kind)
+        res = search_fts(mirror_root, args.query, repo=args.repo, limit=args.limit, kind=args.kind,
+                         owners=owners)
         if args.json:
             print(json.dumps(res, ensure_ascii=False, indent=2))
         else:
@@ -1821,10 +2271,15 @@ def main():
         return
 
     if args.build or len(sys.argv) == 1:
-        build_index(
-            mirror_root, owners=owners, repo_filter=args.repo, full=args.full,
-            verbose=True, allow_global_prune=not args.no_global_prune,
-        )
+        try:
+            build_index(
+                mirror_root, owners=owners, repo_filter=args.repo, full=args.full,
+                verbose=True, allow_global_prune=not args.no_global_prune,
+                skip_repos=args.skip_repos,
+            )
+        except (IndexReadError, RuntimeError, ValueError) as exc:
+            print(f"indexer: {exc}", file=sys.stderr)
+            sys.exit(1)
 
 
 if __name__ == "__main__":

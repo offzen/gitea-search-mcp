@@ -17,9 +17,9 @@ import { dumpSchema, SERVER_NAME, SERVER_VERSION, TOOLS } from '../lib/server.mj
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const BIN = path.join(ROOT, 'bin', 'mcp-server');
 const PKG = JSON.parse(fs.readFileSync(path.join(ROOT, 'package.json'), 'utf8'));
-const EXPECTED_NAMES = ['list_repositories', 'read_file', 'search_code', 'search_docs'];
+const EXPECTED_NAMES = ['list_repositories', 'read_file', 'search_code', 'search_docs', 'sync_mirror'];
 
-test('dumpSchema() returns consistent gitea-search-mcp metadata and 4 neutral tools', () => {
+test('dumpSchema() returns consistent gitea-search-mcp metadata and 5 neutral tools', () => {
   const schema = dumpSchema();
   assert.equal(schema.service, 'gitea-search-mcp');
   assert.equal(schema.service, SERVER_NAME);
@@ -27,7 +27,7 @@ test('dumpSchema() returns consistent gitea-search-mcp metadata and 4 neutral to
   assert.equal(schema.version, SERVER_VERSION);
   assert.equal(schema.transport, 'stdio');
   assert.ok(Array.isArray(schema.functions));
-  assert.equal(schema.functions.length, 4);
+  assert.equal(schema.functions.length, 5);
 
   const fnNames = schema.functions.map((f) => f.name).sort();
   assert.deepEqual(fnNames, EXPECTED_NAMES);
@@ -60,7 +60,7 @@ test('dumpSchema() matches TOOLS inputSchema and valid JSON-Schema contract', ()
 test('dumpSchema({ compact: true }) returns only functions', () => {
   const compact = dumpSchema({ compact: true });
   assert.deepEqual(Object.keys(compact), ['functions']);
-  assert.equal(compact.functions.length, 4);
+  assert.equal(compact.functions.length, 5);
   assert.deepEqual(compact.functions.map((f) => f.name).sort(), EXPECTED_NAMES);
 });
 
@@ -86,5 +86,5 @@ test('CLI bin/mcp-server --dump-schema is pure static with zero side effects and
   assert.equal(compact.stderr, '');
   const parsedCompact = JSON.parse(compact.stdout);
   assert.deepEqual(Object.keys(parsedCompact), ['functions']);
-  assert.equal(parsedCompact.functions.length, 4);
+  assert.equal(parsedCompact.functions.length, 5);
 });

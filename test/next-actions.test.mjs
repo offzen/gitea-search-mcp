@@ -74,9 +74,10 @@ test('C1 MCP argv builders bind option values and terminate options before queri
   }, 7);
   assert.deepEqual(search, [
     '--json', '-n', '7', '-m', '-E', '-s', '-l',
-    '--repo=--sync', '--branch=--doctor', '--sync', '--', '--reindex',
+    // N3：search_code 不再产生 --sync（同步由 sync_mirror 经 --sync-only 触发）；legacy sync:true 被静默忽略。
+    '--repo=--sync', '--branch=--doctor', '--', '--reindex',
   ]);
-  assert.equal(search.filter((v) => v === '--sync').length, 1);
+  assert.equal(search.filter((v) => v === '--sync').length, 0);
   assert.deepEqual(
     buildDocsArgs({ query: '--reindex', repo: '--sync', kind: '--doctor' }, 4),
     ['-D', '--json', '-n', '4', '--repo=--sync', '--kind=--doctor', '--', '--reindex'],
@@ -138,11 +139,16 @@ test('C1 real gts treats option-looking MCP queries only as data', { skip: proce
   }
 });
 
-test('C1 explicit sync remains control, while the legacy argv shape proves the regression', { skip: process.platform === 'win32' }, (t) => {
+test('C1 search_code never syncs; --sync-only (sync_mirror) remains the explicit control', { skip: process.platform === 'win32' }, (t) => {
   const fx = c1Fixture(t);
   const { buildSearchArgs } = loadArgBuilders();
-  const explicit = runC1(fx, buildSearchArgs({ query: 'needle', sync: true }, 5));
-  assert.equal(explicit.status, 1, explicit.stderr);
+  const searchOnly = runC1(fx, buildSearchArgs({ query: 'needle', sync: true }, 5));
+  assert.equal(searchOnly.status, 1, searchOnly.stderr);
+  assert.equal(fs.existsSync(fx.marker), false, 'search_code{sync:true} must not run sync.sh');
+
+  const explicit = runC1(fx, ['--sync-only', '--json']);
+  assert.equal(explicit.status, 0, explicit.stderr);
+  assert.equal(JSON.parse(explicit.stdout).status, 'ok');
   assert.equal(fs.readFileSync(fx.marker, 'utf8'), 'sync\n');
 
   fs.rmSync(fx.marker);
@@ -152,7 +158,11 @@ test('C1 explicit sync remains control, while the legacy argv shape proves the r
 });
 
 // eslint-disable-next-line no-new-func
-const carry = new Function(`${sliceFn('carry')}; return carry;`)();
+// carry() 依赖 2.0.3 新增的 killTree / ACTIVE_CHILDREN / MAX_CHILD_OUTPUT_BYTES / IS_WIN，一并从真实源码切出。
+const carry = new Function(
+  'IS_WIN', 'MAX_CHILD_OUTPUT_BYTES',
+  `const ACTIVE_CHILDREN = new Set(); ${sliceFn('killTree')}; ${sliceFn('carry')}; return carry;`,
+)(false, 64 * 1024 * 1024);
 const runCarry = (p, timeoutMs) => new Promise((resolve) => carry(p, timeoutMs, resolve));
 
 /** 桩子进程：kill() 之后异步 emit close(null, signal)，与真实被信号杀死的进程一致。 */

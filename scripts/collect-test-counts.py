@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import re
+import shutil
 import subprocess
 import sys
 
@@ -41,8 +43,24 @@ PYTHON_SUITES = (
     "test/fts-result-contract.test.py",
     "test/profile-yaml.test.py",
     "test/repo-zero-hit.test.py",
+    "test/indexer-resilience.test.py",
     "test/documentation-contract.test.py",
 )
+
+
+def bash_exe() -> str:
+    """Return the bash to run e2e with. On Windows prefer Git Bash: System32\\bash.exe is the WSL launcher."""
+    if os.name != "nt":
+        return "bash"
+    cands = [shutil.which("bash") or ""]
+    for env in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        base = os.environ.get(env)
+        if base:
+            cands += [os.path.join(base, "Git", "bin", "bash.exe"), os.path.join(base, "Programs", "Git", "bin", "bash.exe")]
+    for c in cands:
+        if c and os.path.isfile(c) and "system32" not in c.lower().replace("/", "\\"):
+            return c
+    return "bash"
 
 
 def run(args: list[str]) -> subprocess.CompletedProcess[str]:
@@ -118,7 +136,7 @@ def python_suites() -> tuple[list[dict[str, object]], bool]:
 
 
 def e2e_count() -> tuple[dict[str, int], bool]:
-    result = run(["bash", "scripts/run-e2e-test.sh"])
+    result = run([bash_exe(), "scripts/run-e2e-test.sh"])
     output = (result.stdout or "") + (result.stderr or "")
     passed = int(m.group(1)) if (m := E2E_SUMMARY.search(output)) else 0
     if not passed:

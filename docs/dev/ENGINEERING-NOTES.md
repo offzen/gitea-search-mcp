@@ -9,7 +9,7 @@
 | 路径 | 核心职责与副作用边界 |
 |---|---|
 | `bin/mcp-server` & `src/index.js` | 标准 MCP 入口：`--dump-schema [--compact]` 纯静态导出（零 I/O、零子进程）；默认连接 stdio。 |
-| `lib/server.mjs` | 4 个中性工具引擎、`search_gitea*`/`search_gitorca*` 兼容转发、`createServer()`/`dumpSchema()`、direct-run 守卫与四层输出护栏。 |
+| `lib/server.mjs` | 5 个中性工具引擎（4 个只读 + `sync_mirror`）、`search_gitea*`/`search_gitorca*` 兼容转发、`createServer()`/`dumpSchema()`、direct-run 守卫与四层输出护栏。 |
 | `bin/gts` & `gts_cli.py` | 跨仓 `git grep` / SQLite FTS5 CLI；`gts_cli.py` 为 setuptools console-script 包装器，优先查 `share/gitea-search-mcp` 并回退旧 `share/dsh-gitea-search`。 |
 | `lib/config.mjs` / `lib/config.py` | Node/Python 字节等价的配置解析器：显式 `--config` / `GITEA_SEARCH_CONFIG` 缺失必报错（禁静默回落），默认用户配置与镜像根支持新旧路径自动回退。 |
 | `lib/indexer.py` | SQLite FTS5 + `jieba` 索引构建与检索（`PRAGMA user_version = 2`）、单仓 savepoint 原子写入、可信枚举下的消失仓清理（R2）与 `--doctor` 诊断。 |
@@ -53,3 +53,12 @@
    - `scripts/sync.sh` 需兼容 macOS Bash 3.2：紧邻中文字符的变量必须写 `${name}`，后台软超时需显式 `"$@" <&0 &` 保留调用方 stdin。
 6. **`--doctor` 综合健康聚合（D7）**：`mirror_sync` 状态为 `failed` 或 `invalid` 时，`overall_status` 至少降为 `WARN`；状态为 `unrecorded`（手工裸镜像 / Zero-Gitea 演示）时保持 `OK`。
 7. **`quickstart-local.sh` 配置零破坏**：拒绝覆盖已有不同内容的 `config.json`、软链接或非普通文件；E2E 测试须显式传入隔离的 `GITEA_SEARCH_CONFIG` 与 `HOME`。
+
+## v2.0.3 工程约定（来自 2.0.2 独立审计）
+
+1. **子进程生命周期**：所有 `gts` / `git` 调用经 `runLimited()`（并发闸）→ `run()` → `carry()`。POSIX 上以 `detached: true` 启动独立进程组，超时 / 取消 / 输出超限 / 宿主断开 / 服务退出都对**整组** `kill(-pid)`；`carry()` 永不在事件回调里抛出（解码错误变结构化结果），输出超过 `GITEA_MAX_CHILD_OUTPUT_BYTES` 即终止。
+2. **测试用「朴素括号配平」切函数**：`test/windows-quote.test.mjs`、`test/next-actions.test.mjs` 从 `lib/server.mjs` 源码里按花括号切出 `run` / `carry` / `killTree`。因此这些函数的**签名与注释里不要出现 `{` `}`**（如默认参数 `opts = {}`），新增的自由变量要同步补进测试的 `new Function(...)` 形参。
+3. **索引事务边界**：`index_repo` 以 SAVEPOINT 为单位提交单仓；`build_index` 隔离单仓 `IndexReadError` 并在最后聚合上报；`--full` 走 `.new` 旁路库 + `os.replace`，替换前先清理旧库的 `-wal/-shm`。`user_version` 在构建结束时盖章，`_require_current_index(persist=True)` 对「行均为 `owner/repo`」的未盖章库自愈。
+4. **仓库过滤单一语义**：`indexer._match_repo_any`（Python）与 `bin/gts fnmatch_any` 必须保持一致；`search_fts` 先在 `doc_rowid` 里解出匹配的 repo 集合再 `IN (...)`，不要在 SQL 里重新实现匹配。
+5. **`sync.sh` 约定**：全局锁 `state/sync.lock`（退出 75；无 `flock` 时降级 `perl`/`python3` `flock` 及带 `.reclaim`/`.takeover.<token>[.<gen>]` 代次回收的 `mkdir` 目录锁）；MCP 托管下 `GITEA_MANAGED_PGROUP=1` 使 `gts --sync` / `--sync-only` 留在服务端进程组内并带 `GITEA_SYNC_TIMEOUT`（并通过 `SYNC_STATUS_RECORD` 输出当轮结构化状态供 `sync_mirror` 判定 `SYNC_DEGRADED`）；远端空仓库（本地从未有对象）在 `converge_default_head` 里视为成功。`test/first-run.test.mjs` 通过替换 `subprocess.Popen` 捕获 `gts → sync.sh` 的 argv/env。
+6. **本地门禁**：`python3 scripts/collect-test-counts.py`（含 E2E 与失败下限）+ `bash scripts/respawn-mcp.sh --selftest` + `python3 scripts/check-public-hygiene.py`（测试里的伪造密钥必须拆串书写，否则卫生扫描会命中）。

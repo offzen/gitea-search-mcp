@@ -109,7 +109,7 @@ test('createAuditLogger redacts query by default and includes raw query only whe
     tool: 'search_code',
     rawTool: 'search_gitea',
     deprecatedAlias: true,
-    args: { query: 'SuperSecretNeedle', repo: 'acme/demo', files_only: true },
+    args: { query: 'SuperSecretNeedle', repo: 'acme/demo', files_only: true, sync: true },
     elapsedMs: 123.6,
     hits: 2,
     respBytes: 512,
@@ -128,6 +128,11 @@ test('createAuditLogger redacts query by default and includes raw query only whe
   assert.equal(recA.args_meta.query_len, 'SuperSecretNeedle'.length);
   assert.match(recA.args_meta.query_sha8, /^[0-9a-f]{8}$/);
   assert.equal(recA.args_meta.files_only, true);
+  assert.equal(recA.args_meta.sync_ignored, true);
+  assert.equal(recA.args_meta.sync, undefined);
+  loggerA.record({ tool: 'sync_mirror', args: {}, elapsedMs: 321 });
+  const syncRecord = JSON.parse(fs.readFileSync(redactedFile, 'utf8').trim().split('\n')[1]);
+  assert.deepEqual(syncRecord.args_meta, { sync: true });
 
   const rawFile = path.join(dir, 'raw.jsonl');
   const loggerB = createAuditLogger({

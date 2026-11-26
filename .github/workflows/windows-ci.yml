@@ -10,17 +10,26 @@ name: Windows CI
 
 on:
   push:
-    branches: [ main, 'v*', 'release/**' ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, 'release/**' ]
+    branches: [ main ]
+  workflow_call:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  # ── W5：pip install . 必须产出真正的 PE 文件（MZ 头），而不是脚本垫片 ──────
+  # ── W5 + W9：pip install . 必须产出真实 PE 文件（MZ 头），并固定 CRLF/路径形态 ──
   windows-pe:
     name: W5 gts.exe 是真实 PE 文件
     if: github.server_url == 'https://github.com'
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -91,11 +100,58 @@ jobs:
           npm ci --ignore-scripts --no-audit --no-fund
           node scripts/test-npm-package.mjs
 
+      - name: W9 记录并固定 checkout 后的行尾与路径形态（CRLF）
+        shell: pwsh
+        run: |
+          # GitHub checkout 在 Windows 上默认 core.autocrlf=true（工作区为 CRLF）
+          $crlf = git config --get core.autocrlf
+          Write-Host "core.autocrlf = $crlf"
+
+          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path README.md))
+          $hasCR = $bytes -contains 13
+          Write-Host "README.md 含 CR(13) = $hasCR"
+
+          # 判据 1：git grep 的路径分隔符形态（决定 read_file 能否解析）
+          $hit = git grep -l "dsh-gitea-search" -- "*.md" | Select-Object -First 1
+          Write-Host "git grep 首个命中路径 = $hit"
+          if (-not $hit) { throw "git grep 未命中，无法判定路径形态" }
+
+          if ($hit -match '\\') {
+            Write-Host "⚠️ 路径使用反斜杠 —— MCP 输出的 path 需归一化为 / 才能跨平台一致"
+          } else {
+            Write-Host "✅ 路径使用正斜杠"
+          }
+
+      - name: W9 端到端 —— 真实建一个 bare 仓并走 git grep
+        shell: pwsh
+        run: |
+          $tmp = Join-Path $env:RUNNER_TEMP "gts-win-grep"
+          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
+          Push-Location $tmp
+          git init -q src
+          Push-Location src
+          "hello windows
+          second line" | Set-Content -Path sample.txt -Encoding utf8
+          git add .
+          git -c user.email=ci@example.com -c user.name=ci commit -qm "init"
+          Pop-Location
+          git clone -q --bare src mirror.git
+          Pop-Location
+
+          Push-Location (Join-Path $tmp "mirror.git")
+          $r = git grep -n "hello" HEAD 2>&1 | Out-String
+          Write-Host $r
+          if ($r -notmatch 'hello') { throw "bare 仓 git grep 未命中" }
+          if ($r -match "`r") { Write-Host "⚠️ git grep 输出含 CR —— 调用方需 strip" }
+          Write-Host "✅ W9 通过：bare 仓检索可用"
+          Pop-Location
+
   # ── W6：PowerShell 5.1 / 7 安装器真实 WhatIf + AST 契约 ───────────────
   windows-ps:
     name: W6 setup-windows.ps1 PS5.1 + PS7 WhatIf
     if: github.server_url == 'https://github.com'
     runs-on: windows-latest
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -236,11 +292,15 @@ jobs:
     name: W7/W8 运行时行为（py${{ matrix.python }} / node${{ matrix.node }}）
     if: github.server_url == 'https://github.com'
     runs-on: windows-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.11', '3.12']
-        node: ['20', '22']
+        include:
+          - python: '3.11'
+            node: '20'
+          - python: '3.12'
+            node: '22'
     steps:
       - uses: actions/checkout@v4
 
@@ -306,59 +366,3 @@ jobs:
           test -n "$GTS_BIN"
           export GTS_BIN
           npm run test:all
-
-  # ── W9：git grep 在 CRLF 工作区上的路径/换行行为，必须被显式固定 ─────────
-  windows-grep-crlf:
-    name: W9 git grep 的 CRLF 与路径分隔符行为
-    if: github.server_url == 'https://github.com'
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: 记录并固定 checkout 后的行尾与路径形态
-        shell: pwsh
-        run: |
-          # GitHub checkout 在 Windows 上默认 core.autocrlf=true（工作区为 CRLF）
-          $crlf = git config --get core.autocrlf
-          Write-Host "core.autocrlf = $crlf"
-
-          $bytes = [System.IO.File]::ReadAllBytes((Resolve-Path README.md))
-          $hasCR = $bytes -contains 13
-          Write-Host "README.md 含 CR(13) = $hasCR"
-
-          # 判据 1：git grep 的路径分隔符形态（决定 read_gitea_file 能否解析）
-          $hit = git grep -l "dsh-gitea-search" -- "*.md" | Select-Object -First 1
-          Write-Host "git grep 首个命中路径 = $hit"
-          if (-not $hit) { throw "git grep 未命中，无法判定路径形态" }
-
-          # 记录形态但不强制其一：真正的要求是「server.mjs 的路径处理要与之匹配」。
-          # 若路径是反斜杠，说明必须在服务端做归一化。
-          if ($hit -match '\\') {
-            Write-Host "⚠️ 路径使用反斜杠 —— MCP 输出的 path 需归一化为 / 才能跨平台一致"
-          } else {
-            Write-Host "✅ 路径使用正斜杠"
-          }
-
-      - name: 端到端 —— 真实建一个 bare 仓并走 git grep
-        shell: pwsh
-        run: |
-          $tmp = Join-Path $env:RUNNER_TEMP "gts-win-grep"
-          New-Item -ItemType Directory -Force -Path $tmp | Out-Null
-          Push-Location $tmp
-          git init -q src
-          Push-Location src
-          "hello windows
-          second line" | Set-Content -Path sample.txt -Encoding utf8
-          git add .
-          git -c user.email=ci@example.com -c user.name=ci commit -qm "init"
-          Pop-Location
-          git clone -q --bare src mirror.git
-          Pop-Location
-
-          Push-Location (Join-Path $tmp "mirror.git")
-          $r = git grep -n "hello" HEAD 2>&1 | Out-String
-          Write-Host $r
-          if ($r -notmatch 'hello') { throw "bare 仓 git grep 未命中" }
-          if ($r -match "`r") { Write-Host "⚠️ git grep 输出含 CR —— 调用方需 strip" }
-          Write-Host "✅ W9 通过：bare 仓检索可用"
-          Pop-Location

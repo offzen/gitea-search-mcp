@@ -2,20 +2,33 @@ name: CI
 
 on:
   push:
-    branches: [ main, 'v*', 'release/**' ]
+    branches: [ main ]
   pull_request:
-    branches: [ main, 'release/**' ]
+    branches: [ main ]
+  workflow_call:
   workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   test:
     name: Unit + E2E + Floors (Ubuntu, py${{ matrix.python }}, node${{ matrix.node }})
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
-        python: ['3.11', '3.12']
-        node: ['20', '22']
+        include:
+          - python: '3.11'
+            node: '20'
+          - python: '3.12'
+            node: '22'
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -49,7 +62,9 @@ jobs:
 
   package:
     name: Packaging (wheel + sdist + npm pack) & Hygiene
+    if: github.server_url == 'https://github.com'
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -80,7 +95,9 @@ jobs:
 
   test-macos:
     name: Unit + E2E + Floors (macOS, py3.12, node22)
+    if: github.server_url == 'https://github.com'
     runs-on: macos-latest
+    timeout-minutes: 15
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4

@@ -225,7 +225,7 @@ try {
   const schema = JSON.parse(dump.stdout);
   assert.equal(schema.service, 'gitea-search-mcp');
   assert.equal(schema.version, pkg.version);
-  assert.equal(schema.functions?.length, 4);
+  assert.equal(schema.functions?.length, 5);
   const auditHelp = run(process.execPath, [path.join(pkgRoot, 'scripts', 'audit-usage.mjs'), '--help'], { cwd: neutralCwd });
   assert.match(auditHelp.stdout, /Usage: gts-audit/);
 

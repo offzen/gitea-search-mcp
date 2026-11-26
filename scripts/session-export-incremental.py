@@ -18,7 +18,7 @@ session-export-incremental.py —— DSH 会话增量导出为 Markdown（供 Gi
   python3 session-export-incremental.py --instance default --src ~/.dsh/sessions --out <dir>
   python3 session-export-incremental.py --force             # 忽略指纹，全量重导（首次/修复用）
   python3 session-export-incremental.py --dry-run           # 只报告会做什么，不写文件
-退出码：0=成功；2=参数/环境错误。
+退出码：0=成功；1=部分会话解压/导出失败（未盖状态戳，下轮重试）；2=参数/环境错误。
 """
 import argparse
 import glob
@@ -41,12 +41,19 @@ try:
 except ImportError:
     _indexer = None
 
+_SECRET_KEYS = (r'api[_-]?key|access[_-]?key|secret[_-]?key|private[_-]?key|client[_-]?secret|'
+                r'auth[_-]?token|access[_-]?token|refresh[_-]?token|token|secret|passwd|password')
+
 REDACT = [
+    # 2.0.3：先处理引号包裹的 JSON / YAML 形式（`"password": "x y"`、`'api_key': 'sk-…'`），
+    # 旧的通用规则要求关键词后紧跟 = 或 :，被引号隔开的写法完全漏掉。
+    (r'(?i)(["\']?(?:' + _SECRET_KEYS + r')["\']?\s*[=:]\s*)(["\'])(?:\\.|(?!\2).)*\2', r'\1\2[REDACTED]\2'),
     (r'(?i)(api[_-]?key|token|secret|password)\s*[=:]\s*\S+', r'\1=[REDACTED]'),
     (r'(?i)Authorization:\s*(Bearer|token)\s+\S+', r'Authorization: \1 [REDACTED]'),
     (r'(?i)([\w./-]*)\.admin-token', r'\1/[ADMIN_TOKEN]'),
     (r'token=[A-Za-z0-9_-]{20,}', 'token=[REDACTED]'),
-    (r'-----BEGIN.*PRIVATE KEY-----.*?-----END.*PRIVATE KEY-----', '[SSH_KEY_REDACTED]'),
+    # 2.0.3：BEGIN/END 之间必须是同一块私钥（原 `BEGIN.*PRIVATE` 的贪婪 `.*` 会吞掉两把钥匙之间的全部正文）。
+    (r'-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----', '[SSH_KEY_REDACTED]'),
     (r'-----BEGIN [A-Z0-9 ]*KEY-----', '[KEY_HEADER_REDACTED]'),
     (r'-----END [A-Z0-9 ]*KEY-----', '[KEY_FOOTER_REDACTED]'),
     # 2026-10-22 修：原规则写成 `ssh-rsAAAA`（少空格）永远匹配不到。
@@ -55,6 +62,13 @@ REDACT = [
     (r'gh[pousr]_[A-Za-z0-9]{20,}', '[GITHUB_TOKEN_REDACTED]'),
     (r'github_pat_[A-Za-z0-9_]{20,}', '[GITHUB_PAT_REDACTED]'),
     (r'glpat-[A-Za-z0-9_-]{20,}', '[GITLAB_TOKEN_REDACTED]'),
+    # 2.0.3：常见云/模型厂商与通用凭据形态（裸出现在正文里、没有 key= 前缀的情况）。
+    (r'\bsk-(?:ant-|proj-)?[A-Za-z0-9_-]{16,}', '[API_KEY_REDACTED]'),
+    (r'\b(?:AKIA|ASIA)[A-Z0-9]{16}\b', '[AWS_KEY_REDACTED]'),
+    (r'\bAIza[0-9A-Za-z_-]{35}\b', '[GOOGLE_API_KEY_REDACTED]'),
+    (r'\bxox[abprs]-[A-Za-z0-9-]{10,}', '[SLACK_TOKEN_REDACTED]'),
+    (r'\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}', '[JWT_REDACTED]'),
+    (r'(?i)(://[^/\s:@]+:)[^@\s/]+@', r'\1[REDACTED]@'),
 ]
 
 # 系统注入消息的 source.kind（不导正文，只留一行占位）
@@ -75,13 +89,18 @@ def redact(text):
 
 
 def decomp(path):
-    """解压 zstd；路径可能以 -- 开头（工作区目录名），必须加 '--' 防被当选项。"""
+    """解压 zstd；路径可能以 -- 开头（工作区目录名），必须加 '--' 防被当选项。
+
+    2.0.3：失败返回 None（调用方据此不写状态指纹、以非零退出码上报）；
+    旧实现返回空串，导致 zstd 缺失/解压出错的会话被盖上「已导出」戳而永远不再重试。
+    """
     try:
-        return subprocess.check_output(
+        out = subprocess.check_output(
             ['zstd', '-dc', '--', path], stderr=subprocess.DEVNULL
         ).decode('utf-8', 'replace')
     except Exception:
-        return ''
+        return None
+    return out if out.strip() else None
 
 
 def pick_session_file(sdir):
@@ -198,8 +217,8 @@ def normalize_sid(raw_id):
 def export_single_session(sd, z, mt, out_path, instance, workspace_name, dry_run):
     """把单个会话导出为一个独立的 .md 文件（细粒度索引模式）。"""
     content = decomp(z)
-    if not content:
-        return 0
+    if content is None:
+        return None
     raw_lines = content.strip().split('\n')
     sid = normalize_sid(sd)
     created, cwd = '', ''
@@ -258,8 +277,8 @@ def export_workspace(pd, out_path, instance, sessions, dry_run):
     total_msgs = 0
     for si, (sd, z, _mt) in enumerate(sessions, 1):
         content = decomp(z)
-        if not content:
-            continue
+        if content is None:
+            return None  # 任一会话解压失败：整个工作区不写文件、不盖指纹，留待下轮重试
         raw_lines = content.strip().split('\n')
         sid, created, cwd = normalize_sid(sd), '', ''
         try:
@@ -335,6 +354,7 @@ def main():
     active_sessions = 0
     exported_count = 0
     legacy_sessions = 0
+    failed_items = []
     t0 = time.perf_counter()
     tracker = _indexer.IoTracker("session_export") if _indexer and hasattr(_indexer, "IoTracker") else None
     if tracker:
@@ -392,6 +412,9 @@ def main():
                     continue
                 out_path = os.path.join(args.out, proj, f"{sid}.md")
                 n_msgs = export_single_session(sd, z, mt, out_path, args.instance, proj, args.dry_run)
+                if n_msgs is None:
+                    failed_items.append(item_key)
+                    continue
                 grand += n_msgs
                 exported_count += 1
                 state[item_key] = stamp
@@ -405,7 +428,11 @@ def main():
                 skipped_items += 1
                 continue
             out_path = os.path.join(args.out, f'{proj}.md')
-            grand += export_workspace(pd, out_path, args.instance, sessions, args.dry_run)
+            n_msgs = export_workspace(pd, out_path, args.instance, sessions, args.dry_run)
+            if n_msgs is None:
+                failed_items.append(proj)
+                continue
+            grand += n_msgs
             exported_count += 1
             state[proj] = fingerprint
 
@@ -445,8 +472,12 @@ def main():
     print(
         f'\n=== {args.instance} [{args.mode}]: {len(workspaces)} 工作区, 导出 {exported_count} 篇, '
         f'跳过未变 {skipped_items}, 活跃跳过 {active_sessions} 会话, 旧版(<v4)会话 {legacy_sessions}, '
-        f'累计消息 {grand} 条 | 耗时 {elapsed_ms:.1f}ms (rchar={rchar}B, write={write_b}B, status={perf_status}) ==='
+        f'累计消息 {grand} 条 | 失败 {len(failed_items)} | 耗时 {elapsed_ms:.1f}ms (rchar={rchar}B, write={write_b}B, status={perf_status}) ==='
     )
+    if failed_items:
+        print(f'EXPORT_FAILED: {len(failed_items)} 个会话/工作区解压失败，未写状态指纹，下轮将重试（'
+              f'检查 zstd 是否在 PATH 且会话文件完整）：' + ', '.join(failed_items[:10]), file=sys.stderr)
+        return 1
     return 0
 
 

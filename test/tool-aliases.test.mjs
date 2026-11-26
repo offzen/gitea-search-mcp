@@ -102,7 +102,7 @@ test('all three tool families route equivalently and legacy aliases warn on stde
   try {
     await client.connect(transport);
     const listed = (await client.listTools()).tools.map((tool) => tool.name).sort();
-    assert.deepEqual(listed, ['list_repositories', 'read_file', 'search_code', 'search_docs']);
+    assert.deepEqual(listed, ['list_repositories', 'read_file', 'search_code', 'search_docs', 'sync_mirror']);
 
     const groups = [
       {

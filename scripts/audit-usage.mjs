@@ -22,6 +22,7 @@ import { decompressZstd as decompressZstdRaw } from '../lib/zstd.mjs';
 const IS_WIN = process.platform === 'win32';
 
 const TOOL_NORMALIZATION = {
+  sync_mirror: 'sync_mirror',
   search_code: 'search_code',
   search_gitea: 'search_code',
   search_gitorca: 'search_code',
@@ -40,6 +41,9 @@ const TOOL_NORMALIZATION = {
   search_gitea_semantic: 'search_semantic',
   search_gitorca_semantic: 'search_semantic',
   search_semantic: 'search_semantic',
+  search_workspace_code: 'search_workspace_code',
+  search_gitea_workspace_code: 'search_workspace_code',
+  search_gitorca_workspace_code: 'search_workspace_code',
 };
 
 const TIER_PARAMS = {
@@ -96,15 +100,26 @@ function unwrapJsonValue(val) {
 function normalizeToolName(rawName, serverHint = '') {
   const s = String(rawName || '').trim();
   if (!s) return null;
-  const server = String(serverHint || '').toLowerCase();
-  const isGiteaServer = /gitea[-_]?search|gitorca[-_]?search/.test(server);
+  let server = String(serverHint || '').toLowerCase();
 
-  // Strip common host prefixes: mcp__gitea-search__search_code, mcp_gitea-search_search_code, etc.
-  const stripped = s
-    .replace(/^mcp_+[^_]+(?:-[^_]+)*_+/i, '')
+  // Strip common host prefixes: mcp__gitea-search__search_code, mcp__gitea_search__read_file, mcp_gitea-search_search_code, etc.
+  let stripped = s;
+  const dblPrefix = /^mcp__([a-z0-9_-]+?)__(.+)$/i.exec(stripped);
+  if (dblPrefix) {
+    if (!server) server = dblPrefix[1].toLowerCase();
+    stripped = dblPrefix[2];
+  } else {
+    const sglPrefix = /^mcp_((?:gitea|gitorca)[-_]?search|[a-z0-9-]+)_(.+)$/i.exec(stripped);
+    if (sglPrefix) {
+      if (!server) server = sglPrefix[1].toLowerCase();
+      stripped = sglPrefix[2];
+    }
+  }
+  stripped = stripped
     .replace(/^gitea[-_]?search[:./]+/i, '')
     .replace(/^gitorca[-_]?search[:./]+/i, '');
 
+  const isGiteaServer = /gitea[-_]?search|gitorca[-_]?search/.test(server);
   const lowerFull = s.toLowerCase();
   const lowerStripped = stripped.toLowerCase();
 
@@ -120,10 +135,35 @@ function normalizeToolName(rawName, serverHint = '') {
   if (isGiteaServer && TOOL_NORMALIZATION[lowerStripped]) {
     return TOOL_NORMALIZATION[lowerStripped];
   }
-  if (['search_docs', 'search_code', 'list_repositories'].includes(lowerFull)) {
-    return TOOL_NORMALIZATION[lowerFull];
+  if (['search_docs', 'search_code', 'list_repositories', 'search_workspace_code', 'sync_mirror'].includes(lowerStripped)) {
+    if (!dblPrefix && !server && lowerStripped !== lowerFull) return null;
+    return TOOL_NORMALIZATION[lowerStripped];
   }
   return null;
+}
+
+const SYNC_MOVED_BANNER_RE = /(?:^|\n)⚠️\s*SYNC_MOVED:\s/;
+
+function isSyncCall(tool, args = {}, meta = {}, output = '') {
+  if (tool === 'sync_mirror') return true;
+  if (tool !== 'search_code' || meta?.sync_ignored || meta?.sync === false) return false;
+  if (output && SYNC_MOVED_BANNER_RE.test(stripToolEnvelope(output))) return false;
+  return args?.sync === true || meta?.sync === true;
+}
+
+function toolOutputText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (Array.isArray(value)) {
+    const texts = value.map((item) => (typeof item?.text === 'string' ? item.text : '')).filter(Boolean);
+    if (texts.length) return texts.join('\n');
+  } else if (typeof value === 'object' && Array.isArray(value.content)) {
+    const texts = value.content.map((item) => (typeof item?.text === 'string' ? item.text : '')).filter(Boolean);
+    if (texts.length) return texts.join('\n');
+  } else if (typeof value === 'object' && typeof value.content === 'string') {
+    return value.content;
+  }
+  return JSON.stringify(value);
 }
 
 function parseTimestampMs(val) {
@@ -229,6 +269,18 @@ function detectInternalMsFromText(text) {
   return m ? Number(m[1]) : null;
 }
 
+/**
+ * 统一时间窗口过滤口径（审计 #17）：
+ * - 未指定 --since（sinceMs === null）时，所有调用（含缺失时间戳的旧记录）全部计入；
+ * - 指定 --since 时，统一按调用发起/请求时间戳（tsMs）过滤，仅保留 tsMs >= sinceMs 的调用；
+ * - 跨边界调用（开始早于 sinceMs、返回晚于 sinceMs）按开始时间判定为窗口外，与服务端 JSONL 审计日志口径一致；
+ * - 启用时间窗时，缺失时间戳（tsMs === null）的调用予以排除，防止无法定位时间的历史调用混入统计。
+ */
+function isCallInWindow(tsMs, sinceMs) {
+  if (sinceMs === null || sinceMs === undefined) return true;
+  return typeof tsMs === 'number' && Number.isFinite(tsMs) && tsMs >= sinceMs;
+}
+
 /** Parse Layer-1 MCP Server audit JSONL file(s). */
 function parseAuditLogs(pathsOrDirs, sinceMs = null) {
   const files = [];
@@ -266,8 +318,18 @@ function parseAuditLogs(pathsOrDirs, sinceMs = null) {
       } catch {
         continue;
       }
-      const tsMs = parseTimestampMs(rec.ts);
-      if (sinceMs !== null && tsMs !== null && tsMs < sinceMs) continue;
+      const endTsMs = parseTimestampMs(rec.ts);
+      const explicitStartMs = parseTimestampMs(rec.started_ts);
+      // 审计 #17：优先使用显式调用开始时间 started_ts；旧日志无 started_ts 时按 ts - elapsed_ms
+      // 推算开始时间（毫秒级近似，与宿主按请求发起时间过滤的口径保持一致）。
+      let tsMs = explicitStartMs;
+      if (tsMs === null && endTsMs !== null) {
+        const elapsed = typeof rec.elapsed_ms === 'number' && Number.isFinite(rec.elapsed_ms) && rec.elapsed_ms >= 0
+          ? rec.elapsed_ms
+          : 0;
+        tsMs = endTsMs - elapsed;
+      }
+      if (!isCallInWindow(tsMs, sinceMs)) continue;
       totalRecords += 1;
       const sid = String(rec.proc_session_id || `${rec.pid || 'unknown'}-${file}`);
       if (!bySession.has(sid)) {
@@ -285,8 +347,9 @@ function parseAuditLogs(pathsOrDirs, sinceMs = null) {
       const sess = bySession.get(sid);
       sess.totalTools += 1;
       const argsMeta = rec.args_meta || {};
+      const tool = normalizeToolName(rec.tool || rec.raw_tool, 'gitea-search') || rec.tool || 'unknown';
       sess.calls.push({
-        tool: normalizeToolName(rec.tool || rec.raw_tool, 'gitea-search') || rec.tool || 'unknown',
+        tool,
         rawTool: rec.raw_tool || rec.tool || 'unknown',
         turn: null,
         toolIndexInTurn: null,
@@ -295,10 +358,10 @@ function parseAuditLogs(pathsOrDirs, sinceMs = null) {
         elapsedMs: typeof rec.elapsed_ms === 'number' ? rec.elapsed_ms : null,
         internalMs: typeof rec.internal_ms === 'number' ? rec.internal_ms : null,
         hits: typeof rec.hits === 'number' ? rec.hits : null,
-        isZeroHit: rec.hits === 0,
+        isZeroHit: tool !== 'sync_mirror' && rec.hits === 0,
         isError: Boolean(rec.is_error),
         truncated: Boolean(rec.truncated),
-        sync: Boolean(argsMeta.sync),
+        sync: isSyncCall(tool, rec.args, argsMeta, toolOutputText(rec.output ?? rec.content)),
         repo: argsMeta.repo || '',
       });
     }
@@ -326,9 +389,12 @@ function parseT3Transcript(filePath, sinceMs = null) {
   }
   if (!objs.length) return null;
 
-  const firstTs = parseTimestampMs(objs[0]?.created_at);
-  const lastTs = parseTimestampMs(objs[objs.length - 1]?.created_at);
-  if (sinceMs !== null && lastTs !== null && lastTs < sinceMs) return null;
+  let lastTs = null;
+  for (const o of objs) {
+    const t = parseTimestampMs(o?.created_at);
+    if (t !== null) lastTs = t;
+  }
+  if (sinceMs !== null && (lastTs === null || lastTs < sinceMs)) return null;
 
   const matchCid = /[/\\]brain[/\\]([^/\\]+)[/\\]/.exec(filePath);
   const sessionId = matchCid ? matchCid[1] : path.basename(path.dirname(filePath));
@@ -352,7 +418,7 @@ function parseT3Transcript(filePath, sinceMs = null) {
     }
     if (o.type === 'PLANNER_RESPONSE' && tsMs && prevPlannerTs && tsMs > prevPlannerTs) {
       const deltaSec = (tsMs - prevPlannerTs) / 1000;
-      if (deltaSec >= 1 && deltaSec <= 120) stepIntervalsSec.push(deltaSec);
+      if (deltaSec >= 1 && deltaSec <= 120 && isCallInWindow(tsMs, sinceMs)) stepIntervalsSec.push(deltaSec);
       prevPlannerTs = tsMs;
     }
     const tcs = Array.isArray(o.tool_calls) ? o.tool_calls : [];
@@ -376,7 +442,7 @@ function parseT3Transcript(filePath, sinceMs = null) {
         (name === 'read_file' || name === 'view_file')
         && (/[/\\]mcp[/\\]gitea-search[/\\]/.test(argsStr) || /[/\\]skills[/\\]gitea-search[/\\]SKILL\.md/.test(argsStr))
       ) {
-        lazySchemaReads += 1;
+        if (isCallInWindow(tsMs, sinceMs)) lazySchemaReads += 1;
         continue;
       }
 
@@ -401,12 +467,13 @@ function parseT3Transcript(filePath, sinceMs = null) {
         let internalMs = null;
         let isZeroHit = false;
         let isError = false;
+        let content = '';
         const respStep = objs[i + 1 + k];
         if (respStep && respStep.type !== 'USER_INPUT' && respStep.type !== 'PLANNER_RESPONSE') {
-          const content = typeof respStep.content === 'string' ? respStep.content : '';
+          content = toolOutputText(respStep.content);
           if (content) {
             internalMs = detectInternalMsFromText(content);
-            if (normalized !== 'read_file' && detectZeroHitFromText(content)) isZeroHit = true;
+            if (normalized !== 'read_file' && normalized !== 'sync_mirror' && detectZeroHitFromText(content)) isZeroHit = true;
             if (respStep.status === 'ERROR' || detectErrorFromText(content)) isError = true;
           }
         }
@@ -416,14 +483,14 @@ function parseT3Transcript(filePath, sinceMs = null) {
           turn: Math.max(1, userTurn),
           toolIndexInTurn: toolInTurn,
           toolIndexInSession: toolInSession,
-          tsMs: tsMs || firstTs,
+          tsMs,
           elapsedMs: null,
           internalMs,
           hits: isZeroHit ? 0 : null,
           isZeroHit,
           isError,
           truncated: false,
-          sync: Boolean(innerArgs?.sync),
+          sync: isSyncCall(normalized, innerArgs, tc.args_meta ?? innerArgs?.args_meta ?? {}, content),
           repo: typeof innerArgs?.repo === 'string' ? innerArgs.repo : '',
         });
       }
@@ -438,7 +505,7 @@ function parseT3Transcript(filePath, sinceMs = null) {
     totalTools: toolInSession,
     lazySchemaReads,
     stepIntervalsSec,
-    calls,
+    calls: calls.filter((c) => isCallInWindow(c.tsMs, sinceMs)),
   };
 }
 
@@ -489,7 +556,7 @@ function parseDshSession(filePath, sinceMs = null, opts = {}) {
       prevStepEndTs = tsMs;
     } else if (type === 'step/start' && tsMs && prevStepEndTs && tsMs > prevStepEndTs) {
       const deltaSec = (tsMs - prevStepEndTs) / 1000;
-      if (deltaSec >= 1 && deltaSec <= 120) stepIntervalsSec.push(deltaSec);
+      if (deltaSec >= 1 && deltaSec <= 120 && isCallInWindow(tsMs, sinceMs)) stepIntervalsSec.push(deltaSec);
     } else if (type === 'step/end' && tsMs) {
       prevStepEndTs = tsMs;
     } else if (type === 'tool/call') {
@@ -501,6 +568,7 @@ function parseDshSession(filePath, sinceMs = null, opts = {}) {
       if (normalized) {
         const parsedArgs = unwrapJsonValue(data.arguments ?? data.input ?? {});
         const args = parsedArgs && typeof parsedArgs === 'object' ? parsedArgs : {};
+        const argsMeta = data.args_meta ?? args.args_meta ?? {};
         const rec = {
           tool: normalized,
           rawTool: rawName,
@@ -514,28 +582,28 @@ function parseDshSession(filePath, sinceMs = null, opts = {}) {
           isZeroHit: false,
           isError: false,
           truncated: false,
-          sync: Boolean(args?.sync),
+          sync: isSyncCall(normalized, args, argsMeta),
           repo: typeof args?.repo === 'string' ? args.repo : '',
         };
         calls.push(rec);
-        if (callId) pending.set(callId, { rec, startMs: tsMs });
+        if (callId) pending.set(callId, { rec, startMs: tsMs, args, argsMeta });
       }
     } else if (type === 'tool/result') {
       const msg = data.message && typeof data.message === 'object' ? data.message : {};
       const callId = String(msg.toolCallId || msg.source?.callId || data.callId || '');
       if (callId && pending.has(callId)) {
-        const { rec, startMs } = pending.get(callId);
+        const { rec, startMs, args, argsMeta } = pending.get(callId);
         pending.delete(callId);
         if (tsMs && startMs && tsMs >= startMs && tsMs - startMs < 600_000) {
           rec.elapsedMs = tsMs - startMs;
         }
-        const contentArr = Array.isArray(msg.content) ? msg.content : [];
-        const textOut = contentArr
-          .map((c) => (typeof c?.text === 'string' ? c.text : ''))
-          .join('\n');
+        const textOut = Array.isArray(msg.content)
+          ? msg.content.map((c) => (typeof c?.text === 'string' ? c.text : '')).join('\n')
+          : toolOutputText(msg.content ?? data.output);
         if (textOut) {
+          rec.sync = isSyncCall(rec.tool, args, argsMeta, textOut);
           rec.internalMs = detectInternalMsFromText(textOut);
-          rec.isZeroHit = rec.tool !== 'read_file' && detectZeroHitFromText(textOut);
+          rec.isZeroHit = rec.tool !== 'read_file' && rec.tool !== 'sync_mirror' && detectZeroHitFromText(textOut);
           if (rec.isZeroHit) rec.hits = 0;
           if (msg.isError || data.isError || detectErrorFromText(textOut)) {
             rec.isError = true;
@@ -546,7 +614,7 @@ function parseDshSession(filePath, sinceMs = null, opts = {}) {
     }
   }
 
-  if (sinceMs !== null && lastTs !== null && lastTs < sinceMs) return null;
+  if (sinceMs !== null && (lastTs === null || lastTs < sinceMs)) return null;
 
   return {
     source: 'dsh',
@@ -556,7 +624,7 @@ function parseDshSession(filePath, sinceMs = null, opts = {}) {
     totalTools: toolInSession,
     lazySchemaReads: 0,
     stepIntervalsSec,
-    calls,
+    calls: calls.filter((c) => isCallInWindow(c.tsMs, sinceMs)),
   };
 }
 
@@ -605,7 +673,7 @@ function parseCodexSession(filePath, sinceMs = null) {
       toolInTurn += 1;
       if (tsMs && prevEventTs && tsMs > prevEventTs) {
         const deltaSec = (tsMs - prevEventTs) / 1000;
-        if (deltaSec >= 1 && deltaSec <= 120) stepIntervalsSec.push(deltaSec);
+        if (deltaSec >= 1 && deltaSec <= 120 && isCallInWindow(tsMs, sinceMs)) stepIntervalsSec.push(deltaSec);
       }
       prevEventTs = tsMs;
       const rawName = String(payload.name || '');
@@ -620,6 +688,7 @@ function parseCodexSession(filePath, sinceMs = null) {
           }
         }
         const callId = String(payload.call_id || payload.id || '');
+        const argsMeta = payload.args_meta ?? args?.args_meta ?? {};
         const rec = {
           tool: normalized,
           rawTool: rawName,
@@ -633,11 +702,11 @@ function parseCodexSession(filePath, sinceMs = null) {
           isZeroHit: false,
           isError: false,
           truncated: false,
-          sync: Boolean(args?.sync),
+          sync: isSyncCall(normalized, args, argsMeta),
           repo: typeof args?.repo === 'string' ? args.repo : '',
         };
         calls.push(rec);
-        if (callId) pending.set(callId, { rec, startMs: tsMs });
+        if (callId) pending.set(callId, { rec, startMs: tsMs, args, argsMeta });
       }
     } else if (
       type === 'response_item'
@@ -645,14 +714,15 @@ function parseCodexSession(filePath, sinceMs = null) {
     ) {
       const callId = String(payload.call_id || payload.id || '');
       if (callId && pending.has(callId)) {
-        const { rec, startMs } = pending.get(callId);
+        const { rec, startMs, args, argsMeta } = pending.get(callId);
         pending.delete(callId);
         if (tsMs && startMs && tsMs >= startMs && tsMs - startMs < 600_000) {
           rec.elapsedMs = tsMs - startMs;
         }
-        const outStr = typeof payload.output === 'string' ? payload.output : JSON.stringify(payload.output || '');
+        const outStr = toolOutputText(payload.output);
+        rec.sync = isSyncCall(rec.tool, args, argsMeta, outStr);
         rec.internalMs = detectInternalMsFromText(outStr);
-        rec.isZeroHit = detectZeroHitFromText(outStr);
+        rec.isZeroHit = rec.tool !== 'sync_mirror' && detectZeroHitFromText(outStr);
         if (rec.isZeroHit) rec.hits = 0;
         if (detectErrorFromText(outStr)) rec.isError = true;
         if (/输出护栏/.test(outStr)) rec.truncated = true;
@@ -661,7 +731,7 @@ function parseCodexSession(filePath, sinceMs = null) {
     }
   }
 
-  if (sinceMs !== null && lastTs !== null && lastTs < sinceMs) return null;
+  if (sinceMs !== null && (lastTs === null || lastTs < sinceMs)) return null;
 
   return {
     source: 'codex',
@@ -671,7 +741,7 @@ function parseCodexSession(filePath, sinceMs = null) {
     totalTools: toolInSession,
     lazySchemaReads: 0,
     stepIntervalsSec,
-    calls,
+    calls: calls.filter((c) => isCallInWindow(c.tsMs, sinceMs)),
   };
 }
 
@@ -685,6 +755,7 @@ function clusterEpisodes(calls, episodeGap = 3) {
   let cur = null;
 
   for (const call of calls) {
+    if (call.tool === 'sync_mirror') continue;
     const canJoin = cur !== null && (
       (call.turn === cur.turn && (
         (call.toolIndexInSession - cur.lastToolIdx) <= episodeGap
@@ -716,7 +787,7 @@ function clusterEpisodes(calls, episodeGap = 3) {
     let kind = 'E3_direct_read';
     if (toolSet.has('search_docs') || toolSet.has('search_hybrid') || toolSet.has('search_semantic')) {
       kind = 'E1_docs_session';
-    } else if (toolSet.has('search_code')) {
+    } else if (toolSet.has('search_code') || toolSet.has('search_workspace_code')) {
       kind = 'E2_code_search';
     }
     const zeroHitCalls = ep.calls.filter((c) => c.isZeroHit).length;
@@ -747,10 +818,16 @@ function estimateSavings(sessions, opts = {}) {
   let lazyOverheadSessions = 0;
   let totalZeroHitCalls = 0;
   let totalSyncCalls = 0;
+  let standaloneSyncSec = 0;
 
   for (const sess of sessions) {
     if (!sess.calls.length) continue;
     if (sess.lazySchemaReads > 0) lazyOverheadSessions += 1;
+    for (const call of sess.calls) {
+      if (call.tool !== 'sync_mirror') continue;
+      totalSyncCalls += 1;
+      standaloneSyncSec += (call.elapsedMs ?? 15_000) / 1000;
+    }
     const eps = clusterEpisodes(sess.calls, episodeGap);
     for (const ep of eps) {
       allEpisodes.push(ep);
@@ -770,7 +847,7 @@ function estimateSavings(sessions, opts = {}) {
     let grossLlmSavedSec = 0;
     let mcpExecTotalSec = 0;
     let penaltyZeroHitSec = 0;
-    let penaltySyncSec = 0;
+    let penaltySyncSec = standaloneSyncSec;
 
     for (const ep of allEpisodes) {
       mcpExecTotalSec += ep.mcpExecSec;
@@ -784,7 +861,7 @@ function estimateSavings(sessions, opts = {}) {
       }
       // Deduct zero-hit retry penalty (half an LLM step per zero-hit refinement)
       penaltyZeroHitSec += ep.zeroHitCalls * (0.5 * llmStepSec);
-      // Deduct explicit sync:true blocking overhead (~15s fallback if elapsedMs missing)
+      // Legacy searches with inline sync retain their historical blocking estimate.
       penaltySyncSec += ep.syncCalls * 15;
     }
 
@@ -832,8 +909,12 @@ function estimateSavings(sessions, opts = {}) {
 
 /** Aggregate statistics for a group of sessions belonging to one source/host. */
 function analyzeSessions(sessions, opts = {}) {
-  const totalSessions = sessions.length;
-  const activeSessions = sessions.filter((s) => s.calls.length > 0);
+  const sinceMs = opts.sinceMs !== undefined ? opts.sinceMs : null;
+  const scopedSessions = sinceMs !== null
+    ? sessions.map((s) => ({ ...s, calls: (s.calls || []).filter((c) => isCallInWindow(c.tsMs, sinceMs)) }))
+    : sessions;
+  const totalSessions = scopedSessions.length;
+  const activeSessions = scopedSessions.filter((s) => s.calls.length > 0);
   const allCalls = activeSessions.flatMap((s) => s.calls);
 
   const byTool = {};
@@ -844,13 +925,17 @@ function analyzeSessions(sessions, opts = {}) {
   let errorCalls = 0;
   let truncatedCalls = 0;
   let lazySchemaSessions = 0;
+  let lazySchemaOnlySessions = 0;
 
   const elapsedMsArr = [];
   const internalMsArr = [];
 
-  for (const sess of sessions) {
+  for (const sess of scopedSessions) {
+    if (!sess.calls.length) {
+      if (sess.lazySchemaReads > 0) lazySchemaOnlySessions += 1;
+      continue;
+    }
     if (sess.lazySchemaReads > 0) lazySchemaSessions += 1;
-    if (!sess.calls.length) continue;
 
     const first = sess.calls[0];
     if (first.turn === null || !sess.totalTools) {
@@ -895,6 +980,7 @@ function analyzeSessions(sessions, opts = {}) {
       : 0,
     by_tool: byTool,
     lazy_schema_sessions: lazySchemaSessions,
+    ...(lazySchemaOnlySessions > 0 ? { lazy_schema_only_sessions: lazySchemaOnlySessions } : {}),
     phase: {
       first_call_timing: firstCallTiming,
       all_calls_relative_position: relativePosition,
@@ -937,8 +1023,39 @@ function discoverDefaultSources(env = process.env) {
   }
 
   const dshDirs = [];
+  const seenDsh = new Set();
+  const addDshDir = (cand) => {
+    if (!cand) return;
+    const expanded = expandHome(cand);
+    if (!fs.existsSync(expanded)) return;
+    let real = expanded;
+    try {
+      real = fs.realpathSync(expanded);
+    } catch {
+      // keep expanded path
+    }
+    if (!seenDsh.has(real)) {
+      seenDsh.add(real);
+      dshDirs.push(expanded);
+    }
+  };
   for (const cand of [env.DSH_HOME, path.join(home, '.dsh')]) {
-    if (cand && fs.existsSync(expandHome(cand))) dshDirs.push(expandHome(cand));
+    addDshDir(cand);
+  }
+  const inTmpHome = path.resolve(expandHome(home)).startsWith(path.resolve(os.tmpdir()));
+  const dataRoot = env.GITEA_AUDIT_DATA_ROOT !== undefined
+    ? env.GITEA_AUDIT_DATA_ROOT
+    : (!IS_WIN && !inTmpHome ? '/data' : '');
+  if (dataRoot && fs.existsSync(dataRoot)) {
+    try {
+      for (const ent of fs.readdirSync(dataRoot, { withFileTypes: true })) {
+        if (ent.isDirectory() && /^dsh[-_]/i.test(ent.name)) {
+          addDshDir(path.join(dataRoot, ent.name, 'state', '.dsh'));
+        }
+      }
+    } catch {
+      // ignore unreadable /data
+    }
   }
 
   const codexDirs = [];
@@ -1099,16 +1216,19 @@ function formatTextReport(report) {
     const latBits = [];
     if (q.elapsed_ms) latBits.push(`e2e p50=${q.elapsed_ms.p50}ms p90=${q.elapsed_ms.p90}ms mean=${q.elapsed_ms.mean}ms`);
     if (q.internal_fts_ms) latBits.push(`fts5 p50=${q.internal_fts_ms.p50}ms`);
+    const lazyInfo = s.lazy_schema_only_sessions
+      ? `${s.lazy_schema_sessions} (+${s.lazy_schema_only_sessions} idle)`
+      : `${s.lazy_schema_sessions}`;
     lines.push(
       `  Quality: zero_hit=${q.zero_hit_calls} (${q.zero_hit_rate_pct}%), errors=${q.error_calls}, `
-      + `lazy_schema_sessions=${s.lazy_schema_sessions}${latBits.length ? ` | ${latBits.join(' | ')}` : ''}`,
+      + `lazy_schema_sessions=${lazyInfo}${latBits.length ? ` | ${latBits.join(' | ')}` : ''}`,
     );
 
     const sv = s.savings;
     const ep = sv.episodes_by_kind;
     lines.push(
       `  Episodes: total=${sv.total_episodes} (E1_docs=${ep.E1_docs_session}, E2_code=${ep.E2_code_search}, E3_read=${ep.E3_direct_read}) `
-      + `| llm_step=${sv.llm_step_sec}s (${sv.llm_step_source})`,
+      + `| sync=${sv.sync_calls} | llm_step=${sv.llm_step_sec}s (${sv.llm_step_source})`,
     );
     for (const tier of ['conservative', 'baseline', 'optimistic']) {
       const t = sv.tiers[tier];
@@ -1127,16 +1247,18 @@ function formatMarkdownReport(report) {
   lines.push('');
   lines.push(`- 生成时间：\`${report.generated_at}\`${report.since ? `（时间起点：\`${report.since}\`）` : ''}`);
   lines.push('');
-  lines.push('| 数据源 | 活跃/总会话 | 覆盖率 | 总调用 | 均次/活跃会话 | 首轮开场触发 | 0 命中率 | 检索簇 (E1/E2/E3) | 净省时（保守 / 基线 / 乐观） |');
-  lines.push('|---|---:|---:|---:|---:|---:|---:|---|---|');
+  lines.push('| 数据源 | 活跃/总会话 | 覆盖率 | 总调用 | 工具调用次数 | 同步调用 | 均次/活跃会话 | 首轮开场触发 | 0 命中率 | 检索簇 (E1/E2/E3) | 净省时（保守 / 基线 / 乐观） |');
+  lines.push('|---|---:|---:|---:|---|---:|---:|---:|---:|---|---|');
   for (const [key, s] of Object.entries(report.sources)) {
     const fc = s.phase.first_call_timing;
     const fcKnown = fc.turn1_opening + fc.turn1_mid_late + fc.turn2_plus;
     const openStr = fcKnown > 0 ? pct(fc.turn1_opening, fcKnown) : 'N/A';
     const ep = s.savings.episodes_by_kind;
     const t = s.savings.tiers;
+    const tools = Object.entries(s.by_tool).map(([name, count]) => `${name}=${count}`).join(', ');
     lines.push(
       `| \`${key}\` | ${s.sessions_active}/${s.sessions_total} | ${s.adoption_rate_pct}% | ${s.calls_total} `
+      + `| ${tools} | ${s.savings.sync_calls} `
       + `| ${s.avg_calls_per_active_session} | ${openStr} | ${s.quality.zero_hit_rate_pct}% `
       + `| ${s.savings.total_episodes} (${ep.E1_docs_session}/${ep.E2_code_search}/${ep.E3_direct_read}) `
       + `| ${t.conservative.net_saved_min}m / **${t.baseline.net_saved_min}m** / ${t.optimistic.net_saved_min}m |`,

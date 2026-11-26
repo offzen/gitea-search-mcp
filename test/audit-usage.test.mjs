@@ -21,10 +21,15 @@ import {
   splitZstdFrames,
 } from '../lib/zstd.mjs';
 import {
+  analyzeSessions,
   clusterEpisodes,
   estimateSavings,
+  formatMarkdownReport,
   normalizeToolName,
+  parseAuditLogs,
+  parseCodexSession,
   parseDshSession,
+  parseT3Transcript,
   runAudit,
 } from '../scripts/audit-usage.mjs';
 
@@ -46,13 +51,88 @@ function compressZstd(buf) {
 test('normalizeToolName maps v2 bare names, v1/legacy aliases, and host prefixes consistently', () => {
   assert.equal(normalizeToolName('search_code', 'gitea-search'), 'search_code');
   assert.equal(normalizeToolName('mcp__gitea-search__search_docs'), 'search_docs');
+  assert.equal(normalizeToolName('mcp__gitea_search__read_file'), 'read_file');
   assert.equal(normalizeToolName('mcp__gitorca_search__read_gitorca_file'), 'read_file');
   assert.equal(normalizeToolName('mcp__gitorca_search__search_gitorca'), 'search_code');
   assert.equal(normalizeToolName('mcp__gitorca_search__search_gitorca_hybrid'), 'search_hybrid');
+  assert.equal(normalizeToolName('mcp__gitorca_search__search_workspace_code'), 'search_workspace_code');
   assert.equal(normalizeToolName('list_gitea_repos'), 'list_repositories');
+  assert.equal(normalizeToolName('sync_mirror'), 'sync_mirror');
+  assert.equal(normalizeToolName('mcp__gitea_search__sync_mirror'), 'sync_mirror');
   assert.equal(normalizeToolName('read_file', ''), null, 'bare read_file without gitea-search server hint must not be misclassified');
   assert.equal(normalizeToolName('read_file', 'gitea-search'), 'read_file');
   assert.equal(normalizeToolName('run_command', ''), null);
+});
+
+test('discoverDefaultSources finds /data/dsh-*/state/.dsh and separates idle lazy_schema_only_sessions', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-audit-autodiscover-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+
+  // Simulate /data/dsh-node1/state/.dsh
+  const dataRoot = path.join(dir, 'data');
+  const dshSess = path.join(dataRoot, 'dsh-node1', 'state', '.dsh', 'sessions', 'ws1', 's1');
+  fs.mkdirSync(dshSess, { recursive: true });
+  fs.writeFileSync(path.join(dshSess, 'session.v4.jsonl'), [
+    JSON.stringify({ type: 'session', id: 's1', createdAt: 1795400000000 }),
+    JSON.stringify({ type: 'turn/start', time: 1795400000100, data: { turn: 1 } }),
+    JSON.stringify({ type: 'tool/call', time: 1795400001000, data: { callId: 'w1', name: 'mcp__gitorca_search__search_workspace_code', arguments: '{"query":"auth"}' } }),
+    JSON.stringify({ type: 'tool/result', time: 1795400001200, data: { message: { toolCallId: 'w1', content: [{ type: 'text', text: '命中 2 个文件' }] } } }),
+  ].join('\n') + '\n');
+
+  // Simulate T3 with 1 active session + 1 idle lazy-schema-only session
+  const t3Providers = path.join(dir, '.t3', 'userdata', 'providers');
+  const sActive = path.join(t3Providers, 'agy', 'brain', 't3-active', '.system_generated', 'logs');
+  const sIdle = path.join(t3Providers, 'agy', 'brain', 't3-idle', '.system_generated', 'logs');
+  fs.mkdirSync(sActive, { recursive: true });
+  fs.mkdirSync(sIdle, { recursive: true });
+  fs.writeFileSync(path.join(sActive, 'transcript.jsonl'), [
+    JSON.stringify({ type: 'USER_INPUT', created_at: '2026-11-24T01:00:00Z' }),
+    JSON.stringify({
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-24T01:00:05Z',
+      tool_calls: [
+        { name: 'read_file', args: { Path: '/x/mcp/gitea-search/search_docs.json' } },
+        { name: 'call_mcp_tool', args: { ServerName: 'gitea-search', ToolName: 'search_docs', Arguments: { query: 'hello' } } },
+      ],
+    }),
+    JSON.stringify({ type: 'GENERIC', created_at: '2026-11-24T01:00:06Z', content: '命中 1 篇' }),
+  ].join('\n') + '\n');
+  fs.writeFileSync(path.join(sIdle, 'transcript.jsonl'), [
+    JSON.stringify({ type: 'USER_INPUT', created_at: '2026-11-24T02:00:00Z' }),
+    JSON.stringify({
+      type: 'PLANNER_RESPONSE',
+      created_at: '2026-11-24T02:00:05Z',
+      tool_calls: [
+        { name: 'read_file', args: { Path: '/x/skills/gitea-search/SKILL.md' } },
+      ],
+    }),
+  ].join('\n') + '\n');
+
+  const cli = spawnSync(
+    process.execPath,
+    [AUDIT_CLI, '--json'],
+    {
+      encoding: 'utf8',
+      env: {
+        ...process.env,
+        HOME: dir,
+        USERPROFILE: dir,
+        DSH_HOME: '',
+        T3_DATA_DIR: '',
+        CODEX_HOME: '',
+        GITEA_AUDIT_LOG: '0',
+        GITEA_AUDIT_DATA_ROOT: dataRoot,
+      },
+    },
+  );
+  assert.equal(cli.status, 0, cli.stderr);
+  const parsed = JSON.parse(cli.stdout);
+  assert.equal(parsed.sources.dsh.calls_total, 1);
+  assert.equal(parsed.sources.dsh.by_tool.search_workspace_code, 1);
+  assert.equal(parsed.sources.dsh.savings.episodes_by_kind.E2_code_search, 1);
+  assert.equal(parsed.sources.t3.sessions_active, 1);
+  assert.equal(parsed.sources.t3.lazy_schema_sessions, 1);
+  assert.equal(parsed.sources.t3.lazy_schema_only_sessions, 1);
 });
 
 test('clusterEpisodes deduplicates consecutive read_file calls on the same repo into one E3 episode', () => {
@@ -236,6 +316,74 @@ test('runAudit parses all 4 sources (audit JSONL, T3, DSH .zstd, Codex) and form
   assert.match(cliMd.stdout, /\| `dsh` \| 1\/1 \|/);
 });
 
+test('all usage sources distinguish sync_mirror, ignored inline sync and legacy inline sync', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-audit-sync-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'fixture.jsonl');
+  const ts = '2026-11-24T00:00:00Z';
+  for (const legacy of [false, true]) {
+    const search = legacy ? 'search_gitea' : 'search_code';
+    const text = legacy ? '返回 1 条' : '⚠️ SYNC_MOVED: 本次未同步';
+    const calls = [
+      { name: legacy ? search : 'sync_mirror', args: legacy ? { sync: true } : {}, text: '完成' },
+      { name: search, args: legacy ? {} : { sync: true }, text },
+    ];
+    const bySource = {
+      audit_log: {
+        parse: (source) => parseAuditLogs([source]).sessions,
+        records: calls.map(({ name, args }, index) => ({
+          ts, tool: name, proc_session_id: 'audit-fixture',
+          args_meta: legacy || index === 0 ? args : { sync_ignored: true },
+        })),
+      },
+      t3: {
+        parse: (source) => [parseT3Transcript(source)],
+        records: calls.flatMap(({ name, args, text }) => [
+          { type: 'PLANNER_RESPONSE', created_at: ts, tool_calls: [
+            { name: 'call_mcp_tool', args: { ServerName: 'gitea-search', ToolName: name, Arguments: args } },
+          ] },
+          { type: 'GENERIC', content: text, created_at: ts },
+        ]),
+      },
+      dsh: {
+        parse: (source) => [parseDshSession(source)],
+        records: calls.flatMap(({ name, args, text }, index) => [
+          { type: 'tool/call', time: ts, data: { name, callId: index + 1, arguments: args } },
+          { type: 'tool/result', time: ts, data: { message: { toolCallId: index + 1, content: [{ text }] } } },
+        ]),
+      },
+      codex: {
+        parse: (source) => [parseCodexSession(source)],
+        records: calls.flatMap(({ name, args, text }, index) => [
+          { type: 'response_item', timestamp: ts, payload: {
+            type: 'function_call', name: 'mcp__gitea-search__' + name, call_id: index + 1, arguments: JSON.stringify(args),
+          } },
+          { type: 'response_item', timestamp: ts, payload: {
+            type: 'function_call_output', call_id: index + 1, output: { content: [{ text }] },
+          } },
+        ]),
+      },
+    };
+    for (const [source, { parse, records }] of Object.entries(bySource)) {
+      fs.writeFileSync(file, records.map((record) => JSON.stringify(record)).join('\n') + '\n');
+      const sessions = parse(file);
+      assert.deepEqual(sessions[0].calls.map((call) => call.sync), [true, false], source);
+      const summary = analyzeSessions(sessions);
+      assert.equal(summary.calls_total, 2, source);
+      assert.equal(summary.savings.sync_calls, 1, source);
+      assert.equal(summary.savings.total_episodes, 1, source);
+      assert.equal(summary.savings.episodes_by_kind.E3_direct_read, 0, source);
+      assert.deepEqual(summary.by_tool, legacy ? { search_code: 2 } : { sync_mirror: 1, search_code: 1 }, source);
+      if (!legacy) {
+        const syncOnly = { ...sessions[0], calls: [sessions[0].calls[0]] };
+        assert.equal(estimateSavings([syncOnly]).tiers.baseline.gross_saved_sec, 0, source);
+        const markdown = formatMarkdownReport({ generated_at: ts, sources: { [source]: summary } });
+        assert.match(markdown, /sync_mirror=1, search_code=1 \| 1 \|/);
+      }
+    }
+  }
+});
+
 test('lib/zstd.mjs splits and decompresses multi-frame (+ skippable) payloads natively and fails closed without CLI', (t) => {
   if (!HAS_ZSTD) {
     t.skip('Neither Node zlib.zstdCompressSync nor zstd CLI is available in this environment');
@@ -331,4 +479,106 @@ test('dsh-session-health.mjs --fix preserves all frames when migrating multi-fra
   assert.equal(outLines[0].version, 4);
   assert.equal(outLines[1].data.source.kind, 'compact-checkpoint');
   assert.equal(outLines[2].data.message.content[0].text, 'reply frame 3');
+});
+
+test('v2.0.3 audit §3.4/§3.7: SYNC_MOVED in search hit content does not mask legacy sync, and paired results preserve args_meta.sync_ignored', (t) => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-audit-sync-edge-'));
+  t.after(() => fs.rmSync(dir, { recursive: true, force: true }));
+  const file = path.join(dir, 'fixture.jsonl');
+  const ts = '2026-11-24T00:00:00Z';
+
+  // Legacy search_code(sync:true) whose matched hit text echoes SYNC_MOVED (and even the literal string inside code)
+  const hitEchoText = [
+    '返回 2 条 / 全库命中 2 条 / 1 个仓',
+    'acme/repo@main:docs/USAGE.md:102:| `SYNC_MOVED` | 旧调用方向只读 search_code 传入了 sync |',
+    "acme/repo@main:lib/server.mjs:982:    lines.push('⚠️ SYNC_MOVED: search_code 已是只读工具');",
+  ].join('\n');
+  const realBannerText = [
+    '返回 1 条 / 全库命中 1 条 / 1 个仓',
+    '⚠️ SYNC_MOVED: search_code 已是只读工具，不再支持 sync 参数，本次未同步。',
+  ].join('\n');
+
+  const cases = {
+    audit_log: {
+      parse: (source) => parseAuditLogs([source]).sessions,
+      records: [
+        { ts, tool: 'search_code', proc_session_id: 'edge', args: { sync: true, query: 'SYNC_MOVED' }, args_meta: { sync: true }, output: hitEchoText },
+        { ts, tool: 'search_code', proc_session_id: 'edge', args: { sync: true, query: 'foo' }, args_meta: { sync_ignored: true }, output: '返回 1 条' },
+        { ts, tool: 'search_code', proc_session_id: 'edge', args: { sync: true, query: 'bar' }, args_meta: {}, output: realBannerText },
+      ],
+    },
+    t3: {
+      parse: (source) => [parseT3Transcript(source)],
+      records: [
+        { type: 'PLANNER_RESPONSE', created_at: ts, tool_calls: [
+          { name: 'call_mcp_tool', args: { ServerName: 'gitea-search', ToolName: 'search_code', Arguments: { sync: true, query: 'SYNC_MOVED' } } },
+        ] },
+        { type: 'GENERIC', content: `Created At: ${ts}\nCompleted At: ${ts}\n${hitEchoText}`, created_at: ts },
+        { type: 'PLANNER_RESPONSE', created_at: ts, tool_calls: [
+          { name: 'call_mcp_tool', args_meta: { sync_ignored: true }, args: { ServerName: 'gitea-search', ToolName: 'search_code', Arguments: { sync: true, query: 'foo' } } },
+        ] },
+        { type: 'GENERIC', content: '返回 1 条', created_at: ts },
+        { type: 'PLANNER_RESPONSE', created_at: ts, tool_calls: [
+          { name: 'call_mcp_tool', args: { ServerName: 'gitea-search', ToolName: 'search_code', Arguments: { sync: true, query: 'bar' } } },
+        ] },
+        { type: 'GENERIC', content: `Created At: ${ts}\nCompleted At: ${ts}\n${realBannerText}`, created_at: ts },
+      ],
+    },
+    dsh: {
+      parse: (source) => [parseDshSession(source)],
+      records: [
+        { type: 'tool/call', time: ts, data: { name: 'search_code', callId: 'c1', arguments: { sync: true, query: 'SYNC_MOVED' } } },
+        { type: 'tool/result', time: ts, data: { message: { toolCallId: 'c1', content: [{ text: hitEchoText }] } } },
+        { type: 'tool/call', time: ts, data: { name: 'search_code', callId: 'c2', args_meta: { sync_ignored: true }, arguments: { sync: true, query: 'foo' } } },
+        { type: 'tool/result', time: ts, data: { message: { toolCallId: 'c2', content: [{ text: '返回 1 条' }] } } },
+        { type: 'tool/call', time: ts, data: { name: 'search_code', callId: 'c3', arguments: { sync: true, query: 'bar' } } },
+        { type: 'tool/result', time: ts, data: { message: { toolCallId: 'c3', content: [{ text: realBannerText }] } } },
+      ],
+    },
+    codex: {
+      parse: (source) => [parseCodexSession(source)],
+      records: [
+        { type: 'response_item', timestamp: ts, payload: { type: 'function_call', name: 'mcp__gitea-search__search_code', call_id: 'c1', arguments: JSON.stringify({ sync: true, query: 'SYNC_MOVED' }) } },
+        { type: 'response_item', timestamp: ts, payload: { type: 'function_call_output', call_id: 'c1', output: { content: [{ text: hitEchoText }] } } },
+        { type: 'response_item', timestamp: ts, payload: { type: 'function_call', name: 'mcp__gitea-search__search_code', call_id: 'c2', args_meta: { sync_ignored: true }, arguments: JSON.stringify({ sync: true, query: 'foo' }) } },
+        { type: 'response_item', timestamp: ts, payload: { type: 'function_call_output', call_id: 'c2', output: { content: [{ text: '返回 1 条' }] } } },
+        { type: 'response_item', timestamp: ts, payload: { type: 'function_call', name: 'mcp__gitea-search__search_code', call_id: 'c3', arguments: JSON.stringify({ sync: true, query: 'bar' }) } },
+        { type: 'response_item', timestamp: ts, payload: { type: 'function_call_output', call_id: 'c3', output: { content: [{ text: realBannerText }] } } },
+      ],
+    },
+  };
+
+  for (const [source, { parse, records }] of Object.entries(cases)) {
+    fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+    const sessions = parse(file);
+    assert.deepEqual(
+      sessions[0].calls.map((c) => c.sync),
+      [true, false, false],
+      `${source}: hit-content SYNC_MOVED must stay sync=true; args_meta.sync_ignored and real SYNC_MOVED banner must be sync=false`,
+    );
+  }
+});
+
+test('Re-audit R2/R3: structured {content} string and array outputs unwrap for SYNC_MOVED, isZeroHit, isError, and internalMs', (t) => {
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gts-audit-r2r3-'));
+  t.after(() => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  const file = path.join(tmpDir, 'codex.jsonl');
+  const ts = '2026-11-26T12:00:00.000Z';
+  const records = [
+    { type: 'response_item', timestamp: ts, payload: { type: 'function_call', name: 'mcp__gitea-search__search_code', call_id: 'c1', arguments: JSON.stringify({ sync: true, query: 'alpha' }) } },
+    { type: 'response_item', timestamp: ts, payload: { type: 'function_call_output', call_id: 'c1', output: { content: '⚠️ SYNC_MOVED: search_code 不再支持 sync\n（无命中，耗时 12ms）' } } },
+    { type: 'response_item', timestamp: ts, payload: { type: 'function_call', name: 'mcp__gitea-search__search_docs', call_id: 'c2', arguments: JSON.stringify({ query: 'missing' }) } },
+    { type: 'response_item', timestamp: ts, payload: { type: 'function_call_output', call_id: 'c2', output: { content: [{ text: '（无命中，耗时 25ms）' }] } } },
+    { type: 'response_item', timestamp: ts, payload: { type: 'function_call', name: 'mcp__gitea-search__read_file', call_id: 'c3', arguments: JSON.stringify({ repo: 'demo', path: 'x' }) } },
+    { type: 'response_item', timestamp: ts, payload: { type: 'function_call_output', call_id: 'c3', output: { content: '读取失败：NOT_FOUND' } } },
+  ];
+  fs.writeFileSync(file, records.map((r) => JSON.stringify(r)).join('\n') + '\n');
+  const session = parseCodexSession(file);
+  assert.equal(session.calls.length, 3);
+  assert.equal(session.calls[0].sync, false, 'string content SYNC_MOVED banner must not count as sync');
+  assert.equal(session.calls[0].isZeroHit, true);
+  assert.equal(session.calls[0].internalMs, 12);
+  assert.equal(session.calls[1].isZeroHit, true, 'array content zero-hit must unwrap cleanly');
+  assert.equal(session.calls[1].internalMs, 25);
+  assert.equal(session.calls[2].isError, true, 'string content error must unwrap cleanly');
 });

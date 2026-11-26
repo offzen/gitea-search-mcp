@@ -1,4 +1,4 @@
-# 新用户零门槛入门手册（Getting Started · v2.0.2）
+# 新用户零门槛入门手册（Getting Started · v2.0.3）
 
 欢迎使用 **`gitea-search-mcp`**！本手册专为**第一次接触本项目的新用户**编写，不假设你熟悉裸镜像（bare mirror）或内部架构，带你用 **3～10 分钟**在自己的电脑和 AI 客户端里跑通第一次跨仓库搜索。
 
@@ -44,7 +44,7 @@
 #### Linux / macOS
 
 ```bash
-git clone --branch v2.0.2 https://github.com/offzen/gitea-search-mcp.git
+git clone --branch v2.0.3 https://github.com/offzen/gitea-search-mcp.git
 cd gitea-search-mcp
 
 # 1) 安装 Node 侧 MCP SDK
@@ -65,7 +65,7 @@ python3 -m pip install '.[fts]'
 #### Windows（原生 PowerShell）
 
 ```powershell
-git clone --branch v2.0.2 https://github.com/offzen/gitea-search-mcp.git
+git clone --branch v2.0.3 https://github.com/offzen/gitea-search-mcp.git
 cd gitea-search-mcp
 
 # 先安装 MCP SDK 与生成原生 Scripts\gts.exe（-SkipIndex 表示稍后再建索引）
@@ -196,10 +196,11 @@ bash scripts/doctor-mcp.sh --verify
 | **Claude Desktop** | macOS: `~/Library/Application Support/Claude/claude_desktop_config.json`<br>Windows: `%APPDATA%\Claude\claude_desktop_config.json` |
 | **Cursor** | 全局 `~/.cursor/mcp.json` 或项目级 `.cursor/mcp.json` |
 | **Claude Code CLI** | 终端直接运行：`claude mcp add gitea-search -e GITEA_MIRROR_ROOT=/srv/gitea-mirror -e GITEA_OWNERS=acme-team -- node /绝对路径/gitea-search-mcp/bin/mcp-server` |
-| **Cline / Windsurf / Codex** | 在各自设置面板打开 MCP Servers JSON 配置文件 |
+| **Cline / Windsurf** | 在各自设置面板打开 MCP Servers JSON 配置文件 |
+| **Codex CLI** | `~/.codex/config.toml`（TOML，**不是** `mcpServers` JSON；见下方专用模板），或终端运行 `codex mcp add` |
 | **DeepSeek Harness (DSH)** | `~/.dsh/profiles/<desktop\|web\|headless>/cordis.patch.yml`（见下方专用 YAML） |
 
-#### 通用 JSON 模板（Claude Desktop / Cursor / Cline / Windsurf）
+#### 通用 JSON 模板（Claude Desktop / Cursor / Cline / Windsurf；Codex CLI 见下方 TOML）
 
 ```json
 {
@@ -225,6 +226,27 @@ bash scripts/doctor-mcp.sh --verify
 > }
 > ```
 
+#### Codex CLI 专用模板（`~/.codex/config.toml`）
+
+Codex CLI 使用 TOML 的 `[mcp_servers.<name>]` 表，而非 `mcpServers` JSON（以下已用 `codex-cli 0.172.0` 在隔离 `CODEX_HOME` 下实测）：
+
+```toml
+[mcp_servers.gitea-search]
+command = "node"
+args = ["/绝对路径/gitea-search-mcp/bin/mcp-server"]
+
+[mcp_servers.gitea-search.env]
+GITEA_MIRROR_ROOT = "/srv/gitea-mirror"
+GITEA_OWNERS = "acme-team"
+```
+
+也可直接用命令生成同样的配置（`--env` 可重复，`--` 之后是启动命令与参数）：
+
+```bash
+codex mcp add gitea-search --env GITEA_MIRROR_ROOT=/srv/gitea-mirror --env GITEA_OWNERS=acme-team -- node /绝对路径/gitea-search-mcp/bin/mcp-server
+codex mcp list
+```
+
 #### DeepSeek Harness (DSH) 专用模板（`cordis.patch.yml`）
 
 ```yaml
@@ -244,7 +266,7 @@ bash scripts/doctor-mcp.sh --verify
 
 ### 3.3 重启 / 重载你的客户端
 
-保存配置后，**重启或重载对应的 AI 客户端 / Profile**（安装和自检脚本不会替你重启宿主）。打开新会话，确认客户端的 MCP 工具列表里已出现以下 **4 个工具**（部分客户端会自动加上类似 `mcp__gitea-search__` 的前缀，属正常现象，详见 [`TOOL-NAMING.md`](TOOL-NAMING.md)）。
+保存配置后，**重启或重载对应的 AI 客户端 / Profile**（安装和自检脚本不会替你重启宿主）。打开新会话，确认客户端的 MCP 工具列表里已出现以下 **5 个工具**（部分客户端会自动加上类似 `mcp__gitea-search__` 的前缀，属正常现象，详见 [`TOOL-NAMING.md`](TOOL-NAMING.md)）。
 
 ---
 
@@ -259,7 +281,7 @@ bash scripts/doctor-mcp.sh --verify
 3. **第 3 句（跨分支搜代码 + 按需小窗口精读，不撑爆上下文）**：
    > “请先用 `search_code`（开启 `files_only=true`）找一下哪个文件提到了 `resolveConfig`，再用 `read_file` 只读它的前 60 行。”
 
-### 4 个工具一句话选型口诀
+### 5 个工具一句话选型口诀
 
 | 标准工具名 | 什么时候用它？ | 关键特点 |
 |---|---|---|
@@ -267,6 +289,7 @@ bash scripts/doctor-mcp.sh --verify
 | **`search_docs`** | 查**中文问题、技术文档、配置说明、导出会话** | 走 SQLite FTS5 + `jieba` 分词，相关性高（仅覆盖每仓**默认分支**） |
 | **`search_code`** | 查**精确函数/变量名、文件路径（`mode="path"`）、提交记录（`mode="message"`）或非默认分支** | 走极速 `git grep`，覆盖**全部本地分支** |
 | **`read_file`** | 搜索定位到具体仓库和路径后，读取正文 | 默认每次只读 400 行 / `60 KB` 安全切片，不爆上下文 |
+| **`sync_mirror`** | 刚 `git push` 的新改动搜不到，必须立刻刷新镜像 | 唯一会写镜像的工具，显式调用一次即可，不要放进循环 |
 
 ---
 
@@ -279,7 +302,7 @@ bash scripts/doctor-mcp.sh --verify
 | `DEPENDENCY_MISSING` 或中文搜不到 | Python 环境没装 `jieba`，或放进镜像后还没建索引 | 执行 `python3 -m pip install '.[fts]'`（或配好 `.venv`）后再跑一次 `gts --reindex` |
 | Windows 报找不到可执行 `gts` CLI | Windows 不支持直接 spawn 无后缀脚本，或把 `GITEA_SEARCH_CLI` 写成了 `"python bin\gts"` | 确保 `GITEA_SEARCH_CLI` 指向 `pip install ".[fts]"` 生成的单个 `Scripts\gts.exe` 完整路径 |
 | `doctor-mcp` 探针全绿，但客户端里没工具 | 客户端未重载配置，或 JSON 里填了相对路径/`~` 未展开 | 把 `args` 和 `env` 中的路径全部改成绝对路径，完全重启一次客户端 |
-| 刚 `git push` 的新改动搜不到 | 本地裸镜像不会在每次查询时自动联网拉取远端 | 手动执行一次 `bash scripts/sync.sh -q`（或配置定时 Cron，见 [`OPERATIONS.md`](OPERATIONS.md)） |
+| 刚 `git push` 的新改动搜不到 | 本地裸镜像不会在每次查询时自动联网拉取远端 | 调用 MCP 的 `sync_mirror`（需在宿主 MCP `env` 中提供 `GITEA_URL` 等同步变量以避免 `SYNC_DEGRADED`），或手动执行 `bash scripts/sync.sh -q`（生产建议配置定时 Cron，见 [`OPERATIONS.md`](OPERATIONS.md)） |
 
 ---
 
